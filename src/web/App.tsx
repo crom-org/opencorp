@@ -1,5 +1,5 @@
 import { type Component, onMount, createEffect, Show } from "solid-js";
-import { Router, Route, useLocation, useNavigate } from "@solidjs/router";
+import { Router, Route, useLocation, useNavigate, Navigate } from "@solidjs/router";
 import { Sidebar } from "./components/Sidebar";
 import { Topbar } from "./components/Topbar";
 import { GlobalTitlebar } from "./components/GlobalTitlebar";
@@ -14,9 +14,7 @@ import { TasksView } from "./views/Tasks";
 import { AgentesView } from "./views/Agentes";
 import { WorkspaceView } from "./views/Workspace";
 import { ReunioesView } from "./views/Reunioes";
-import { AgendaView } from "./views/Agenda";
 import { FluxosView } from "./views/Fluxos";
-import { HooksView } from "./views/Hooks";
 import { AppsView } from "./views/Apps";
 import { SecretsView } from "./views/Secrets";
 import { HistoricoView } from "./views/Historico";
@@ -67,7 +65,7 @@ export const AppLayout: Component<{ children?: any }> = (props) => {
         <Show when={wsAtivo()} fallback={<GlobalTitlebar />}>
           <Topbar />
         </Show>
-        <main class="flex-1 min-h-0 overflow-y-auto relative bg-zinc-950">
+        <main class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden relative bg-zinc-950">
           {props.children}
         </main>
       </div>
@@ -86,9 +84,9 @@ export const App: Component = () => {
       <Route path="/tasks" component={TasksView} />
       <Route path="/agentes" component={AgentesView} />
       <Route path="/reunioes" component={ReunioesView} />
-      <Route path="/agenda" component={AgendaView} />
+      <Route path="/agenda" component={() => <Navigate href="/fluxos?filtro=cron" />} />
       <Route path="/fluxos" component={FluxosView} />
-      <Route path="/hooks" component={HooksView} />
+      <Route path="/hooks" component={() => <Navigate href="/fluxos" />} />
       <Route path="/apps" component={AppsView} />
       <Route path="/secrets" component={SecretsView} />
       <Route path="/historico" component={HistoricoView} />

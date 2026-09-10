@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { FlowError } from "./errors.js";
 import { RegistryStore, type MetaRegistro } from "./registry-store.js";
@@ -7,6 +7,8 @@ import { eventBus } from "./event-bus.js";
 import { SessionManager, type OpcoesRun, type ResultadoRun } from "./session-manager.js";
 import { mkdirRecursive, writeFileAtomic } from "../utils/fs-safe.js";
 import { opencorpHome } from "../utils/paths.js";
+
+import { sincronizarFluxoParaScheduler, removerJobDoScheduler, sincronizarJobsParaFluxos } from "./scheduler-flow-bridge.js";
 
 export const nosFlowSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, "use kebab-case para o id do nó"),
@@ -27,27 +29,40 @@ export const nosFlowSchema = z.object({
     "debate",
     "script",
     "reuniao",
+    "loop",
+    "cron",
+    "componente",
+    "subflow",
+    "http_request",
+    "delay",
   ]),
   config: z.record(z.string(), z.unknown()).default({}),
   pos: z.object({ x: z.number(), y: z.number() }).optional(),
+});
+
+export const arestaFlowSchema = z.object({
+  de: z.string().min(1),
+  para: z.string().min(1),
+  rotulo: z.string().optional(),
+  condicao: z.string().optional(),
 });
 
 export const flowSchema = z.object({
   id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "use kebab-case para o id do flow"),
   nome: z.string().min(1),
   nos: z.array(nosFlowSchema).min(1),
-  arestas: z
-    .array(
-      z.object({
-        de: z.string().min(1),
-        para: z.string().min(1),
-      }),
-    )
-    .default([]),
+  arestas: z.array(arestaFlowSchema).default([]),
 });
 
 export type NoFlow = z.infer<typeof nosFlowSchema>;
+export type ArestaFlow = z.infer<typeof arestaFlowSchema>;
 export type Flow = z.infer<typeof flowSchema>;
+
+export interface FlowExport {
+  version: number;
+  exported_at: string;
+  flow: Flow;
+}
 
 export interface NoExecInfo {
   id: string;
@@ -133,19 +148,96 @@ export class FlowStore {
     return flow;
   }
 
-  async listar(wsPath: string): Promise<{ id: string; nome: string; nos: number; arestas: number }[]> {
+  async listar(wsPath: string): Promise<{
+    id: string;
+    nome: string;
+    nos: number;
+    arestas: number;
+    gatilhos: Array<{ tipo: string; detalhe?: string }>;
+    temLoop: boolean;
+  }[]> {
+    try {
+      await sincronizarJobsParaFluxos(this.homeDir);
+    } catch {
+      /* não bloqueia listagem */
+    }
     const dir = this.dir(wsPath);
     if (!existsSync(dir)) return [];
-    const saida: { id: string; nome: string; nos: number; arestas: number }[] = [];
+    const saida: {
+      id: string;
+      nome: string;
+      nos: number;
+      arestas: number;
+      gatilhos: Array<{ tipo: string; detalhe?: string }>;
+      temLoop: boolean;
+    }[] = [];
     for (const f of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
       try {
         const flow = this.validarTexto(readFileSync(join(dir, f), "utf8"), join(dir, f));
-        saida.push({ id: flow.id, nome: flow.nome, nos: flow.nos.length, arestas: flow.arestas.length });
+        const gatilhos = flow.nos
+          .filter((n) => n.tipo === "cron" || n.tipo === "webhook" || n.tipo === "manual")
+          .map((n) => ({
+            tipo: n.tipo,
+            detalhe: (n.config as any)?.expressao_cron || (n.config as any)?.url || undefined,
+          }));
+        const temLoop = flow.nos.some((n) => n.tipo === "loop");
+        saida.push({
+          id: flow.id,
+          nome: flow.nome,
+          nos: flow.nos.length,
+          arestas: flow.arestas.length,
+          gatilhos,
+          temLoop,
+        });
       } catch {
         continue;
       }
     }
     return saida.sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  /**
+   * Lista todos os nós webhook de todos os flows, incluindo a URL
+   * determinística para trigger: POST /flows/:flowId/webhook
+   */
+  async listarWebhooks(wsPath: string, baseUrl?: string): Promise<{
+    flow_id: string;
+    flow_nome: string;
+    no_id: string;
+    url: string;
+    metodo: string;
+    config_url?: string;
+  }[]> {
+    const dir = this.dir(wsPath);
+    if (!existsSync(dir)) return [];
+    const saida: {
+      flow_id: string;
+      flow_nome: string;
+      no_id: string;
+      url: string;
+      metodo: string;
+      config_url?: string;
+    }[] = [];
+    const base = baseUrl ?? "";
+    for (const f of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+      try {
+        const flow = this.validarTexto(readFileSync(join(dir, f), "utf8"), join(dir, f));
+        for (const no of flow.nos.filter((n) => n.tipo === "webhook")) {
+          const config = no.config as { url?: string; metodo?: string };
+          saida.push({
+            flow_id: flow.id,
+            flow_nome: flow.nome,
+            no_id: no.id,
+            url: `${base}/flows/${encodeURIComponent(flow.id)}/webhook`,
+            metodo: "POST",
+            config_url: config.url,
+          });
+        }
+      } catch {
+        continue;
+      }
+    }
+    return saida;
   }
 
   async obter(wsPath: string, id: string): Promise<Flow> {
@@ -189,10 +281,10 @@ export class FlowStore {
         throw new FlowError(`flow inválido${onde("")}: aresta aponta para nó inexistente "${a.para}"`);
       }
     }
-    const manuais = flow.nos.filter((n) => n.tipo === "manual");
-    if (manuais.length !== 1) {
+    const gatilhos = flow.nos.filter((n) => n.tipo === "manual" || n.tipo === "cron" || n.tipo === "webhook");
+    if (gatilhos.length === 0) {
       throw new FlowError(
-        `flow inválido${onde("")}: v1 exige exatamente 1 nó "manual" (gatilho) — encontrados ${manuais.length}`,
+        `flow inválido${onde("")}: exige pelo menos 1 nó gatilho ("manual", "cron" ou "webhook")`,
       );
     }
     for (const no of flow.nos) {
@@ -309,6 +401,42 @@ export class FlowStore {
           }
         }
       }
+      if (no.tipo === "loop") {
+        const maxIter = typeof config.max_iteracoes === "number" ? config.max_iteracoes : 5;
+        if (maxIter < 1 || maxIter > 100) {
+          throw new FlowError(`flow inválido${onde("")}: nó "loop" "${no.id}" precisa de config.max_iteracoes entre 1 e 100`);
+        }
+        if (config.retornar_para && !porId.has(config.retornar_para as string)) {
+          throw new FlowError(`flow inválido${onde("")}: nó "loop" "${no.id}" aponta para retornar_para inexistente "${config.retornar_para}"`);
+        }
+        if (config.saida_final && !porId.has(config.saida_final as string)) {
+          throw new FlowError(`flow inválido${onde("")}: nó "loop" "${no.id}" aponta para saida_final inexistente "${config.saida_final}"`);
+        }
+      }
+      if (no.tipo === "cron") {
+        if (typeof config.expressao_cron !== "string" || config.expressao_cron.trim().length === 0) {
+          throw new FlowError(`flow inválido${onde("")}: nó "cron" "${no.id}" precisa de config.expressao_cron`);
+        }
+      }
+      if (no.tipo === "subflow") {
+        if (typeof config.flow_id !== "string" || config.flow_id.trim().length === 0) {
+          throw new FlowError(`flow inválido${onde("")}: nó "subflow" "${no.id}" precisa de config.flow_id`);
+        }
+        if (config.flow_id.trim() === flow.id) {
+          throw new FlowError(`flow inválido${onde("")}: nó "subflow" "${no.id}" não pode invocar a si mesmo (recursão circular direta)`);
+        }
+      }
+      if (no.tipo === "http_request") {
+        if (typeof config.url !== "string" || config.url.trim().length === 0) {
+          throw new FlowError(`flow inválido${onde("")}: nó "http_request" "${no.id}" precisa de config.url`);
+        }
+      }
+      if (no.tipo === "delay") {
+        const seg = Number(config.segundos);
+        if (Number.isNaN(seg) || seg < 1 || seg > 3600) {
+          throw new FlowError(`flow inválido${onde("")}: nó "delay" "${no.id}" precisa de config.segundos entre 1 e 3600`);
+        }
+      }
     }
     // Suporte completo a múltiplas saídas por nó (bifurcação / execução paralela estilo n8n).
     // Qualquer nó pode ter múltiplas arestas de saída.
@@ -323,16 +451,27 @@ export class FlowStore {
           lista.push(o.proximo);
         }
       }
+      if (no.tipo === "loop") {
+        const ret = no.config.retornar_para as string | undefined;
+        const saida = no.config.saida_final as string | undefined;
+        if (ret) lista.push(ret);
+        if (saida) lista.push(saida);
+      }
       adjacentes.set(no.id, lista.filter((x) => x.length > 0));
     }
+    const nosDeControle = new Set(flow.nos.filter((n) => n.tipo === "loop").map((n) => n.id));
     const emVisita = new Set<string>();
     const visitados = new Set<string>();
     const caminho: string[] = [];
     const dfs = (noId: string): void => {
       if (emVisita.has(noId)) {
         const inicio = caminho.indexOf(noId);
-        const ciclo = [...caminho.slice(inicio), noId].join(" → ");
-        throw new FlowError(`flow inválido${onde("")}: ciclo detectado — ${ciclo}`);
+        const ciclo = [...caminho.slice(inicio), noId];
+        const temControle = ciclo.some((id) => nosDeControle.has(id));
+        if (!temControle) {
+          throw new FlowError(`flow inválido${onde("")}: ciclo detectado — ${ciclo.join(" → ")}`);
+        }
+        return;
       }
       if (visitados.has(noId)) return;
       emVisita.add(noId);
@@ -353,6 +492,11 @@ export class FlowStore {
       this.caminho(wsPath, flow.id),
       `${JSON.stringify(flow, null, 2)}\n`,
     );
+    try {
+      await sincronizarFluxoParaScheduler(wsPath, flow, this.homeDir);
+    } catch {
+      /* não interrompe salvar */
+    }
   }
 
   async deletar(wsPath: string, id: string): Promise<void> {
@@ -362,6 +506,11 @@ export class FlowStore {
     }
     const { rm } = await import("node:fs/promises");
     await rm(path, { force: true });
+    try {
+      await removerJobDoScheduler(wsPath, id, this.homeDir);
+    } catch {
+      /* não interrompe exclusão */
+    }
   }
 
   textoAtual(wsPath: string, id: string): string {
@@ -370,6 +519,65 @@ export class FlowStore {
       throw new FlowError(`flow "${id}" não encontrado`);
     }
     return readFileSync(path, "utf8");
+  }
+
+  async exportar(wsPath: string, id: string): Promise<FlowExport> {
+    const flow = await this.obter(wsPath, id);
+    return {
+      version: 1,
+      exported_at: this.agora().toISOString(),
+      flow,
+    };
+  }
+
+  async exportarJson(wsPath: string, id: string): Promise<string> {
+    const exp = await this.exportar(wsPath, id);
+    return `${JSON.stringify(exp, null, 2)}\n`;
+  }
+
+  async importar(
+    wsPath: string,
+    dados: unknown,
+    opts: { sobrescrever?: boolean; novoId?: string } = {},
+  ): Promise<Flow> {
+    let bruto = dados;
+    if (typeof dados === "string") {
+      try {
+        bruto = JSON.parse(dados);
+      } catch (err) {
+        throw new FlowError(`JSON inválido para importação de flow: ${msg(err)}`);
+      }
+    }
+    const flowObj =
+      bruto && typeof bruto === "object" && "flow" in bruto
+        ? (bruto as { flow: unknown }).flow
+        : bruto;
+
+    if (!flowObj || typeof flowObj !== "object") {
+      throw new FlowError("Dados de importação inválidos: esperado objeto flow");
+    }
+
+    const flowClone = { ...(flowObj as Record<string, unknown>) };
+    if (opts.novoId) {
+      flowClone.id = opts.novoId;
+    }
+
+    const parsed = flowSchema.safeParse(flowClone);
+    if (!parsed.success) {
+      const iss = parsed.error.issues[0]!;
+      const campo = iss.path.join(".") || "(raiz)";
+      throw new FlowError(`flow importado inválido → campo "${campo}": ${iss.message}`);
+    }
+
+    const flow = parsed.data;
+    const path = this.caminho(wsPath, flow.id);
+    if (existsSync(path) && !opts.sobrescrever) {
+      throw new FlowError(`flow "${flow.id}" já existe — use sobrescrever para substituir`, { exitCode: 1 });
+    }
+
+    this.validarSemantica(flow, `flow importado "${flow.id}"`);
+    await this.salvar(wsPath, flow);
+    return flow;
   }
 
   async executar(
@@ -436,6 +644,15 @@ export class FlowStore {
       eventBus.emit("flow-inicio", { flow: flowId, exec_id: execId, entrada });
     }
 
+    void this.registros.eventoAuditoria(wsPath, {
+      por: `flow:${flowId}`,
+      evento: "flow_iniciado",
+      flow_id: flowId,
+      exec_id: execId,
+      resumo: `flow "${flowId}" (${flow.nome}) iniciado`,
+      entrada: entrada.slice(0, 300),
+    }).catch(() => undefined);
+
     let contexto = retomando ? retomando.contexto : stripAnsi(entrada);
     let status: "concluido" | "falhou" = "concluido";
     let motivo: string | null = null;
@@ -446,11 +663,17 @@ export class FlowStore {
     const filaNos: Array<{ no: NoFlow; contexto: string; noAnterior?: NoFlow }> = [];
     const inicial = retomando
       ? porId(flow, retomando.noId)
-      : flow.nos.find((n) => n.tipo === "manual");
+      : (flow.nos.find((n) => n.tipo === "manual") ||
+         flow.nos.find((n) => n.tipo === "cron") ||
+         flow.nos.find((n) => n.tipo === "webhook") ||
+         flow.nos[0]);
     if (inicial) {
       filaNos.push({ no: inicial, contexto, noAnterior: undefined });
     }
-    const executadosNaSessao = new Set<string>();
+    const iteracoesPorNo: Record<string, number> = {};
+    const sessoesPorNo: Record<string, string> = {};
+    let totalPassos = 0;
+    const TETO_SEGURANCA_PASSOS = 100;
 
     try {
       while (filaNos.length > 0) {
@@ -458,14 +681,84 @@ export class FlowStore {
         const no = item.no;
         contexto = item.contexto;
         noAnterior = item.noAnterior;
-        if (executadosNaSessao.has(no.id)) continue;
-        executadosNaSessao.add(no.id);
-        if (no.tipo === "manual") {
-          contexto = entrada;
+
+        totalPassos++;
+        if (totalPassos > TETO_SEGURANCA_PASSOS) {
+          throw new FlowError(`teto de segurança atingido (${TETO_SEGURANCA_PASSOS} passos) — loop infinito interrompido`);
+        }
+
+        const voltaAtual = (iteracoesPorNo[no.id] || 0) + 1;
+        iteracoesPorNo[no.id] = voltaAtual;
+
+        // Se o nó não é do tipo loop e já ultrapassou o teto padrão sem estar num loop declarado
+        const tetoNo = typeof (no.config as any)?.max_iteracoes === "number" ? (no.config as any).max_iteracoes : 10;
+        if (no.tipo !== "loop" && voltaAtual > tetoNo) {
+          continue;
+        }
+
+        if (no.tipo === "manual" || no.tipo === "cron") {
+          contexto = entrada || (no.tipo === "cron" ? `Gatilho Cron acionado em ${this.agora().toISOString()}` : entrada);
           saidasPorNo[no.id] = contexto;
           await marcarNo(no.id, "ok");
+        } else if (no.tipo === "loop") {
+          const config = no.config as {
+            max_iteracoes?: number;
+            condicao_parada?: string;
+            retornar_para?: string;
+            saida_final?: string;
+          };
+          const teto = Math.max(1, config.max_iteracoes ?? 5);
+          const parouPorCondicao = Boolean(config.condicao_parada && contexto.includes(config.condicao_parada));
+          const atingiuTeto = voltaAtual >= teto;
+          const encerrar = parouPorCondicao || atingiuTeto;
+          const tsIteracao = this.agora();
+
+          await marcarNo(no.id, "ok");
+          saidasPorNo[no.id] = contexto;
+          // Histórico indexado por iteração — ex.: saidasPorNo["loop-revisao#2"]
+          saidasPorNo[`${no.id}#${voltaAtual}`] = contexto;
+          eventBus.emit("flow-no", {
+            flow: flowId,
+            no: no.id,
+            status: "ok",
+            volta: voltaAtual,
+            teto,
+            encerrado: encerrar,
+          });
+
+          // ── Journal: persistir snapshot de cada iteração do loop ──
+          await this.registros.anexarEvento(wsPath, "execucoes", execId, {
+            ts: tsIteracao.toISOString(),
+            por: `flow:${flowId}`,
+            evento: "loop-iteracao",
+            no: no.id,
+            volta: voltaAtual,
+            teto,
+            encerrado: encerrar,
+            motivo_encerramento: parouPorCondicao ? "condicao_parada" : atingiuTeto ? "teto_atingido" : null,
+            contexto_preview: contexto.slice(0, 500),
+            resumo: `loop "${no.id}" volta ${voltaAtual}/${teto}${encerrar ? " (encerrado)" : ""}`,
+          });
+
+          if (encerrar) {
+            if (config.saida_final) {
+              const prox = porId(flow, config.saida_final);
+              if (prox) filaNos.push({ no: prox, contexto, noAnterior: no });
+            }
+          } else {
+            if (config.retornar_para) {
+              const prox = porId(flow, config.retornar_para);
+              if (prox) filaNos.push({ no: prox, contexto, noAnterior: no });
+            }
+          }
+          continue;
         } else if (no.tipo === "agente") {
-          const config = no.config as { agente: string; ordem: string; resposta_arquivo?: string };
+          const config = no.config as {
+            agente: string;
+            ordem: string;
+            resposta_arquivo?: string;
+            session_mode?: "nova" | "reaproveitar";
+          };
           // Interpolação estilo n8n ($json, {{$input}}, {{$node["id"]}}, {{entrada}})
           let ordemBase = config.ordem
             .replaceAll("{{entrada}}", contexto)
@@ -492,17 +785,26 @@ export class FlowStore {
           }
 
           // contrato de resposta por ARQUIVO: a resposta limpa fica no sandbox
-          // (o terminal do agent run carrega transcript/ANSI — não é canal confiável)
           const arquivoResposta = config.resposta_arquivo ?? "";
           const ordem = arquivoResposta
             ? `${ordemBase}\n\n[contrato de resposta] Salve sua resposta final completa em sandbox/${arquivoResposta} e responda no terminal apenas "ok".`
             : ordemBase;
+
+          let sessionId: string | undefined = undefined;
+          if (config.session_mode === "reaproveitar") {
+            if (!sessoesPorNo[no.id]) {
+              sessoesPorNo[no.id] = `sess-${flowId}-${no.id}-${Date.now().toString(36)}`;
+            }
+            sessionId = sessoesPorNo[no.id];
+          }
+
           let resultado: ResultadoRun;
           try {
             resultado = await this.sessoes.rodar({
               agente: config.agente,
               ordem,
               model: opts.model,
+              session: sessionId,
               workspaceDir: wsPath,
               referencias: [execId],
               tipo: "flow-no",
@@ -761,21 +1063,30 @@ ${rotulos.map((r) => `- ${r}`).join("\n")}`;
               `nó "${no.id}" (decisao): resposta não correspondeu a nenhum rótulo válido (${rotulos.join(", ")})`,
             );
           }
-          const proximo = config.opcoes.find((o) => o.rotulo === escolha)!.proximo;
+          const proximoConfig = config.opcoes?.find((o) => o.rotulo === escolha)?.proximo;
+          const arestaRotulo = flow.arestas.find(
+            (a) => a.de === no.id && (a.rotulo === escolha || a.condicao === escolha),
+          );
+          const proximoAlvo = arestaRotulo ? arestaRotulo.para : proximoConfig;
+
           // decisão ANEXA ao contexto (não sobrescreve) — nós seguintes
           // (registro/saída) precisam da substância, não só do rótulo
           contexto = `${contexto}\n\n[decisão (${no.id})]: ${escolha}`;
           eventBus.emit("flow-no", { flow: flowId, no: no.id, status: "ok", decisao: escolha });
           await marcarNo(no.id, "ok");
           saidasPorNo[no.id] = contexto;
-          const prox = porId(flow, proximo);
-          if (prox) filaNos.push({ no: prox, contexto, noAnterior: no });
+          if (proximoAlvo) {
+            const prox = porId(flow, proximoAlvo);
+            if (prox) filaNos.push({ no: prox, contexto, noAnterior: no });
+          }
           continue;
-        } else if (no.tipo === "script") {
-          // Nó de Execução de Script / Código do Workspace (estilo n8n Code/Exec Node)
+        } else if (no.tipo === "script" || no.tipo === "componente") {
+          // Nó de Execução de Script / Componente Modular do Workspace (estilo n8n Code/Custom Component)
           const config = no.config as {
             comando?: string;
             arquivo?: string;
+            codigo?: string;
+            componente_id?: string;
             runtime?: "bash" | "node" | "python";
             timeout_ms?: number;
           };
@@ -788,10 +1099,39 @@ ${rotulos.map((r) => `- ${r}`).join("\n")}`;
           const timeout = Math.min(config.timeout_ms || 60000, 300000);
 
           try {
-            if (config.arquivo) {
-              const caminhoArq = join(wsPath, config.arquivo);
-              if (!existsSync(caminhoArq)) {
-                throw new FlowError(`Arquivo de script não encontrado no workspace: ${config.arquivo}`);
+            if (config.componente_id) {
+              const { ComponentStore } = await import("./component-store.js");
+              const compStore = new ComponentStore();
+              const res = await compStore.testar(wsPath, config.componente_id, contexto);
+              if (!res.ok) {
+                throw new FlowError(`componente "${config.componente_id}" falhou: ${res.erro}`);
+              }
+              saidaScript = res.saida;
+            } else if (config.codigo) {
+              const runtime = config.runtime || "node";
+              const flag = runtime === "bash" ? "-c" : "-e";
+              const cmd = runtime === "python" ? "python3" : runtime === "bash" ? "bash" : "node";
+              const res = await execFileAsync(cmd, [flag, config.codigo], {
+                cwd: wsPath,
+                timeout,
+                env: {
+                  ...process.env,
+                  OPENCORP_ENTRADA: contexto,
+                  OPENCORP_INPUT: contexto,
+                  OPENCORP_FLOW_ID: flowId,
+                  OPENCORP_NODE_ID: no.id,
+                  OPENCORP_WORKSPACE_DIR: wsPath,
+                },
+              });
+              saidaScript = (res.stdout || res.stderr || "").trim();
+            } else if (config.arquivo) {
+              const caminhoAbsoluto = resolve(wsPath, config.arquivo);
+              const wsPathAbsoluto = resolve(wsPath);
+              if (!caminhoAbsoluto.startsWith(wsPathAbsoluto)) {
+                throw new FlowError(`Acesso negado: o arquivo "${config.arquivo}" está fora do workspace`);
+              }
+              if (!existsSync(caminhoAbsoluto)) {
+                throw new FlowError(`Arquivo de script/componente não encontrado no workspace: ${config.arquivo}`);
               }
               const runtime =
                 config.runtime ||
@@ -800,30 +1140,61 @@ ${rotulos.map((r) => `- ${r}`).join("\n")}`;
                   : config.arquivo.endsWith(".js") || config.arquivo.endsWith(".mjs")
                   ? "node"
                   : "bash");
-              const res = await execFileAsync(runtime, [caminhoArq], {
+              const res = await execFileAsync(runtime, [caminhoAbsoluto], {
                 cwd: wsPath,
                 timeout,
-                env: { ...process.env, OPENCORP_ENTRADA: contexto, OPENCORP_FLOW_ID: flowId },
+                env: {
+                  ...process.env,
+                  OPENCORP_ENTRADA: contexto,
+                  OPENCORP_INPUT: contexto,
+                  OPENCORP_FLOW_ID: flowId,
+                  OPENCORP_NODE_ID: no.id,
+                  OPENCORP_WORKSPACE_DIR: wsPath,
+                },
               });
               saidaScript = (res.stdout || res.stderr || "").trim();
             } else if (config.comando) {
-              const comandoInterpolado = config.comando.replaceAll("{{entrada}}", contexto);
+              const comandoInterpolado = config.comando.replaceAll("{{entrada}}", contexto).replaceAll("{{$input}}", contexto);
               const res = await execAsync(comandoInterpolado, {
                 cwd: wsPath,
                 timeout,
-                env: { ...process.env, OPENCORP_ENTRADA: contexto, OPENCORP_FLOW_ID: flowId },
+                env: {
+                  ...process.env,
+                  OPENCORP_ENTRADA: contexto,
+                  OPENCORP_INPUT: contexto,
+                  OPENCORP_FLOW_ID: flowId,
+                  OPENCORP_NODE_ID: no.id,
+                  OPENCORP_WORKSPACE_DIR: wsPath,
+                },
               });
               saidaScript = (res.stdout || res.stderr || "").trim();
             } else {
-              throw new FlowError(`Nó script "${no.id}" requer 'arquivo' ou 'comando' configurado`);
+              throw new FlowError(`Nó ${no.tipo} "${no.id}" requer 'componente_id', 'codigo', 'arquivo' ou 'comando' configurado`);
             }
 
-            contexto = saidaScript || contexto;
-            eventBus.emit("flow-no", { flow: flowId, no: no.id, status: "ok" });
+            // ── JSON I/O estruturada: tentar parsear stdout como JSON ──
+            let saidaFinal = saidaScript || contexto;
+            let saidaJson: unknown = undefined;
+            if (saidaScript) {
+              try {
+                saidaJson = JSON.parse(saidaScript);
+                // Se parseia como JSON, preservar a saída estruturada e usar
+                // o campo "output" como contexto de texto, se existir
+                if (typeof saidaJson === "object" && saidaJson !== null && "output" in (saidaJson as Record<string, unknown>)) {
+                  saidaFinal = String((saidaJson as Record<string, unknown>).output);
+                }
+              } catch {
+                // stdout não é JSON — usar como texto puro (comportamento padrão)
+              }
+            }
+            contexto = saidaFinal;
+            // Armazenar saída completa (JSON quando disponível) para interpolação
+            saidasPorNo[no.id] = saidaJson !== undefined ? JSON.stringify(saidaJson) : contexto;
+            eventBus.emit("flow-no", { flow: flowId, no: no.id, status: "ok", json: saidaJson !== undefined });
             await marcarNo(no.id, "ok");
           } catch (erro) {
             await marcarNo(no.id, "falhou", null);
-            throw new FlowError(`nó "${no.id}" (script) falhou: ${msg(erro)}`);
+            throw new FlowError(`nó "${no.id}" (${no.tipo}) falhou: ${msg(erro)}`);
           }
         } else if (no.tipo === "reuniao") {
           // Nó de Convocação e Execução de Reunião de Diretoria / Agentes
@@ -854,6 +1225,90 @@ ${rotulos.map((r) => `- ${r}`).join("\n")}`;
             await marcarNo(no.id, "falhou", null);
             throw new FlowError(`nó "${no.id}" (reuniao) falhou: ${msg(erro)}`);
           }
+        } else if (no.tipo === "subflow") {
+          // Nó de Execução de Sub-Fluxo (Pipeline Modular estilo n8n Execute Workflow)
+          const config = no.config as { flow_id: string; entrada?: string };
+          const subFlowId = (config.flow_id || "").trim();
+          if (!subFlowId) {
+            await marcarNo(no.id, "falhou", null);
+            throw new FlowError(`nó "${no.id}" (subflow) requer 'flow_id' configurado`);
+          }
+          const subEntrada = config.entrada
+            ? config.entrada.replaceAll("{{entrada}}", contexto).replaceAll("{{$input}}", contexto)
+            : contexto;
+          try {
+            const subRes = await this.executar(wsPath, subFlowId, {
+              entrada: subEntrada,
+              model: opts.model,
+            });
+            contexto = subRes.contextoFinal || subEntrada;
+            eventBus.emit("flow-no", {
+              flow: flowId,
+              no: no.id,
+              status: subRes.status === "concluido" ? "ok" : "falhou",
+              subflow: subFlowId,
+              sub_exec_id: subRes.execId,
+            });
+            await marcarNo(no.id, subRes.status === "concluido" ? "ok" : "falhou", subRes.execId);
+            if (subRes.status === "falhou") {
+              throw new FlowError(`subflow "${subFlowId}" falhou`);
+            }
+          } catch (erro) {
+            await marcarNo(no.id, "falhou", null);
+            throw new FlowError(`nó "${no.id}" (subflow "${subFlowId}") falhou: ${msg(erro)}`);
+          }
+        } else if (no.tipo === "http_request") {
+          // Nó de Requisição HTTP Externa (Webhook / REST API / Outgoing Call)
+          const config = no.config as {
+            url: string;
+            metodo?: string;
+            headers?: Record<string, string>;
+            corpo?: string;
+            timeout_ms?: number;
+          };
+          const urlInterpolada = config.url
+            .replaceAll("{{entrada}}", encodeURIComponent(contexto))
+            .replaceAll("{{$input}}", encodeURIComponent(contexto));
+          const metodo = (config.metodo || "GET").toUpperCase();
+          const corpoInterpolado = config.corpo
+            ? config.corpo.replaceAll("{{entrada}}", contexto).replaceAll("{{$input}}", contexto)
+            : metodo !== "GET" && metodo !== "HEAD"
+            ? contexto
+            : undefined;
+
+          try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), config.timeout_ms || 30000);
+            const res = await fetch(urlInterpolada, {
+              method: metodo,
+              headers: { "content-type": "application/json", ...(config.headers || {}) },
+              body: corpoInterpolado,
+              signal: controller.signal,
+            });
+            clearTimeout(timer);
+            const textoResp = await res.text();
+            contexto = textoResp;
+            eventBus.emit("flow-no", {
+              flow: flowId,
+              no: no.id,
+              status: res.ok ? "ok" : "falhou",
+              status_code: res.status,
+            });
+            await marcarNo(no.id, res.ok ? "ok" : "falhou");
+            if (!res.ok && res.status >= 400) {
+              throw new FlowError(`HTTP ${res.status}: ${textoResp.slice(0, 200)}`);
+            }
+          } catch (erro) {
+            await marcarNo(no.id, "falhou", null);
+            throw new FlowError(`nó "${no.id}" (http_request) falhou: ${msg(erro)}`);
+          }
+        } else if (no.tipo === "delay") {
+          // Nó de Aguardar / Delay / Pausa temporizada (ex: Wait 30s)
+          const config = no.config as { segundos?: number };
+          const seg = Math.min(Math.max(Number(config.segundos) || 1, 1), 3600);
+          await new Promise((r) => setTimeout(r, seg * 1000));
+          eventBus.emit("flow-no", { flow: flowId, no: no.id, status: "ok", delay_seg: seg });
+          await marcarNo(no.id, "ok");
         }
         saidasPorNo[no.id] = contexto;
         noAnterior = no;
@@ -908,6 +1363,16 @@ ${rotulos.map((r) => `- ${r}`).join("\n")}`;
       motivo,
       resumo: `flow ${flowId} ${status}${motivo ? ` (${motivo})` : ""}`,
     });
+
+    await this.registros.eventoAuditoria(wsPath, {
+      por: `flow:${flowId}`,
+      evento: status === "concluido" ? "flow_concluido" : "flow_falhou",
+      flow_id: flowId,
+      exec_id: execId,
+      status,
+      motivo,
+      resumo: `flow ${flowId} ${status}${motivo ? ` (${motivo})` : ""}`,
+    }).catch(() => undefined);
 
     if (status === "falhou") {
       const noAlvo = nosInfo.find((n) => n.status === "falhou");

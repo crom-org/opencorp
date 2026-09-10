@@ -146,7 +146,20 @@ export class RegistryStore {
     if (this.existe(wsPath, opts.categoria, opts.id)) {
       return this.lerMeta(wsPath, opts.categoria, opts.id);
     }
-    return this.criar(wsPath, opts);
+    try {
+      return await this.criar(wsPath, opts);
+    } catch (err) {
+      if (err instanceof RegistryError && /já existe/i.test(err.message)) {
+        for (let i = 0; i < 10; i++) {
+          try {
+            return await this.lerMeta(wsPath, opts.categoria, opts.id);
+          } catch {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+        }
+      }
+      throw err;
+    }
   }
 
   async criar(wsPath: string, opts: OpcoesCriar): Promise<MetaRegistro> {

@@ -18,7 +18,10 @@ import { BudgetManager } from "../core/budget-manager.js";
 import { ApprovalsStore } from "../core/approvals-store.js";
 import { SettingsError, SettingsStore } from "../core/settings-store.js";
 import { FlowStore, type Flow, type SessaoFlow } from "../core/flow-store.js";
+import { ComponentStore } from "../core/component-store.js";
+import { registrarBuiltins } from "../core/builtin-components.js";
 import { migrarTeamsParaFlows } from "../core/flow-migrate.js";
+import { sincronizarJobsParaFluxos } from "../core/scheduler-flow-bridge.js";
 import { MeetingManager, gerarIdReuniao } from "../core/meeting-manager.js";
 import { TaskStore, type Task } from "../core/task-store.js";
 import { Scheduler, parseAgendaTask } from "../core/scheduler.js";
@@ -29,7 +32,7 @@ import { AppStore } from "../core/app-store.js";
 import { TeamStore } from "../core/team-store.js";
 import { OrquestradorDeTeams } from "../core/team-orchestrator.js";
 import { instalarMencoes } from "../core/mention-runner.js";
-import { TaskError, SchedulerError, HookError, AppError, TeamError, MeetingError, NotificationError, AgentError, OpencorpError, RegistryError, WorkspaceError, FlowError } from "../core/errors.js";
+import { TaskError, SchedulerError, HookError, AppError, TeamError, MeetingError, NotificationError, AgentError, OpencorpError, RegistryError, WorkspaceError, FlowError, ComponentError } from "../core/errors.js";
 import { eventBus, type EventoBus } from "../core/event-bus.js";
 import { OpencodeServerManager, SecretarioError, extrairAcoesMensagens, extrairPassosMensagens, limparPrefixoWorkspace, dirOpencodeHome, dirOpencodeData, authOpencodePath, authOverridesPathWorkspace, mascararChave, fundirAuth, PROVEEDOR_RE, type EntradaAuth, type MensagemOc, type ParteOc, type PassoChat } from "../core/opencode-server.js";
 import { taskCreateSchema } from "../schemas/task.js";
@@ -111,13 +114,29 @@ const ROUTES: DefinicaoRota[] = [
   { method: "GET", path: "/tools", descricao: "Lista ferramentas declarativas do workspace (.opencorp/tools/*.json — só a spec, sem executar)" },
   { method: "GET", path: "/flows", descricao: "Lista flows disponíveis" },
   { method: "POST", path: "/flows", descricao: "Cria novo flow", corpo: true },
+  { method: "POST", path: "/flows/import", descricao: "Importa flow a partir de payload JSON", corpo: true },
   { method: "POST", path: "/flows/migrate-teams", descricao: "Migra teams legados para flows (fusão team×fluxo)" },
   { method: "PUT", path: "/flows/:id", descricao: "Salva o grafo completo do flow (valida semântica)", corpo: true },
   { method: "DELETE", path: "/flows/:id", descricao: "Exclui flow" },
   { method: "GET", path: "/flows/:id", descricao: "Obtém detalhes de um flow" },
+  { method: "GET", path: "/flows/:id/export", descricao: "Exporta flow em formato JSON (suporta query ?download=1)" },
   { method: "GET", path: "/flows/:id/status", descricao: "Última execução do flow (status por nó)" },
   { method: "POST", path: "/flows/:id/run", descricao: "Executa um flow", corpo: true },
   { method: "POST", path: "/flows/:id/resume", descricao: "Retoma execução falha do último nó ok (corpo: { exec_id })", corpo: true },
+  { method: "GET", path: "/webhooks", descricao: "Lista todos os webhooks ativos (nós webhook em flows, com URLs de trigger)" },
+  { method: "GET", path: "/components", descricao: "Lista componentes reutilizáveis do marketplace no workspace" },
+  { method: "POST", path: "/components", descricao: "Cria novo componente reutilizável no workspace", corpo: true },
+  { method: "GET", path: "/components/shared", descricao: "Lista componentes compartilhados globalmente" },
+  { method: "POST", path: "/components/import", descricao: "Importa componente via JSON", corpo: true },
+  { method: "GET", path: "/components/:id", descricao: "Obtém definição de um componente" },
+  { method: "PUT", path: "/components/:id", descricao: "Atualiza definição de um componente", corpo: true },
+  { method: "DELETE", path: "/components/:id", descricao: "Exclui um componente" },
+  { method: "POST", path: "/components/:id/test", descricao: "Executa teste de um componente com payload de entrada", corpo: true },
+  { method: "POST", path: "/components/:id/publish", descricao: "Publica componente no registry compartilhado global" },
+  { method: "POST", path: "/components/:id/install", descricao: "Instala componente do registry compartilhado global para o workspace" },
+  { method: "GET", path: "/components/:id/export", descricao: "Exporta componente em formato JSON" },
+  { method: "GET", path: "/audit", descricao: "Consulta histórico de auditoria (paginado; filtros por evento, por, flow)" },
+  { method: "GET", path: "/audit/flows", descricao: "Consulta histórico de auditoria específico de execuções de fluxos" },
   { method: "POST", path: "/meetings", descricao: "Inicia nova reunião (202 com id — sala consultável em tempo real)", corpo: true },
   { method: "GET", path: "/meetings", descricao: "Lista reuniões: salas vivas em memória + históricas do disco" },
   { method: "GET", path: "/meetings/:id", descricao: "Estado em tempo real da sala (turno, mensagens do buffer vivo, consenso)" },
@@ -570,6 +589,7 @@ function statusHttpDe(erro: unknown): number {
   if (erro instanceof NotificationError) return ((erro as unknown as { status?: number }).status ?? 400);
   if (erro instanceof AppError) return ((erro as unknown as { status?: number }).status ?? 404);
   if (erro instanceof RegistryError || erro instanceof WorkspaceError || erro instanceof AgentError) return 422;
+  if (erro instanceof ComponentError) return /não encontrado/i.test(erro.message) ? 404 : 400;
   if (erro instanceof FlowError) return /não encontrado/i.test(erro.message) ? 404 : 400;
   if (erro instanceof SecretarioError) return (erro as SecretarioError).status ?? 500;
   return 500;
@@ -726,6 +746,25 @@ async function citacoesAgente(
   return citacoes;
 }
 
+/** Rate limiter in-memory por IP para endpoints webhook (Fase 4 - Item 14) */
+class WebhookRateLimiter {
+  private requests = new Map<string, number[]>();
+  constructor(private limit: number = 30, private windowMs: number = 60_000) {}
+
+  check(ip: string): { ok: boolean; retryAfter?: number } {
+    const now = Date.now();
+    const timestamps = (this.requests.get(ip) ?? []).filter((t) => now - t < this.windowMs);
+    if (timestamps.length >= this.limit) {
+      const oldest = timestamps[0] ?? now;
+      const retryAfter = Math.ceil((oldest + this.windowMs - now) / 1000);
+      return { ok: false, retryAfter: Math.max(retryAfter, 1) };
+    }
+    timestamps.push(now);
+    this.requests.set(ip, timestamps);
+    return { ok: true };
+  }
+}
+
 export function createApiServer(opcoes: ApiServerOptions = {}): {
   server: Server;
   token: string;
@@ -741,7 +780,10 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
   const settings = new SettingsStore(base);
   const secretsStore = new SecretsStore(opcoes.homeDir ?? opencorpHome());
   const engineAccounts = new EngineAccountStore({ homeDir: opcoes.homeDir ?? opencorpHome() });
+  const components = new ComponentStore({ homeDir: opcoes.homeDir });
+  const webhookLimiter = new WebhookRateLimiter(30, 60_000);
   const flows = new FlowStore({ ...base, sessoes: opcoes.sessoes as unknown as SessaoFlow | undefined });
+  void sincronizarJobsParaFluxos(opcoes.homeDir ?? opencorpHome()).catch(() => undefined);
   const meetings = new MeetingManager({ ...base, sessoes: opcoes.sessoes as never });
   const tasks = new TaskStore();
   const scheduler = new Scheduler({ homeDir: opcoes.homeDir });
@@ -2526,6 +2568,27 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
           enviar(res, 201, f);
           return;
         }
+        if (rota === "/flows/import" && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const corpo = (await lerCorpo(req)) as Record<string, unknown>;
+          const payloadFlow =
+            corpo && typeof corpo === "object" && "flow" in corpo
+              ? corpo.flow
+              : corpo && typeof corpo === "object" && "nos" in corpo
+              ? corpo
+              : corpo?.dados ?? corpo;
+
+          const sobrescrever = Boolean(corpo?.sobrescrever ?? corpo?.force);
+          const novoId = corpo?.novoId ?? corpo?.id;
+
+          const importado = await flows.importar(ws.path, payloadFlow, {
+            sobrescrever,
+            novoId: typeof novoId === "string" && novoId.trim().length > 0 ? novoId.trim() : undefined,
+          });
+          eventBus.emit("flow-salvo", { flow: importado.id });
+          enviar(res, 201, { ok: true, flow: importado });
+          return;
+        }
         if (rota === "/flows/migrate-teams" && req.method === "POST") {
           // fusão team×fluxo (PLANO-WEB-CRUD F3): converte teams legados em flows
           const ws = await resolverWs(url);
@@ -2560,6 +2623,22 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
           enviar(res, 200, { ok: true, id: flowId });
           return;
         }
+        const mFlowExport = /^\/flows\/([^/]+)\/export$/.exec(rota);
+        if (mFlowExport && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const flowId = decodeURIComponent(mFlowExport[1]!);
+          const exportData = await flows.exportar(ws.path, flowId);
+          if (url.searchParams.get("download") === "1") {
+            res.writeHead(200, {
+              "content-type": "application/json; charset=utf-8",
+              "content-disposition": `attachment; filename="flow-${flowId}.json"`,
+            });
+            res.end(JSON.stringify(exportData, null, 2));
+            return;
+          }
+          enviar(res, 200, exportData);
+          return;
+        }
         const mFlowExecucoes = /^\/flows\/([^/]+)\/execucoes$/.exec(rota);
         if (mFlowExecucoes && req.method === "GET") {
           const ws = await resolverWs(url);
@@ -2582,6 +2661,28 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
           enviar(res, 202, { status: "iniciado", flow: flowId });
           return;
         }
+        const mFlowWebhook = /^\/flows\/([^/]+)\/webhook$/.exec(rota);
+        if (mFlowWebhook && req.method === "POST") {
+          const ip = req.socket.remoteAddress || "127.0.0.1";
+          const rateCheck = webhookLimiter.check(ip);
+          if (!rateCheck.ok) {
+            res.setHeader("Retry-After", String(rateCheck.retryAfter));
+            enviar(res, 429, {
+              erro: "Too Many Requests — limite de 30 req/min atingido para webhooks",
+              retry_after: rateCheck.retryAfter,
+            });
+            return;
+          }
+          const ws = await resolverWs(url);
+          const rawCorpo = await lerCorpo(req);
+          const flowId = decodeURIComponent(mFlowWebhook[1]!);
+          const entradaStr = typeof rawCorpo === "string" ? rawCorpo : JSON.stringify(rawCorpo ?? {});
+          void flows.executar(ws.path, flowId, { entrada: entradaStr }).catch((err) => {
+            console.error(`[flows] erro ao executar webhook do flow ${flowId}:`, err);
+          });
+          enviar(res, 202, { ok: true, status: "iniciado", flow: flowId, gatilho: "webhook" });
+          return;
+        }
         const mFlowResume = /^\/flows\/([^/]+)\/resume$/.exec(rota);
         if (mFlowResume && req.method === "POST") {
           const ws = await resolverWs(url);
@@ -2598,7 +2699,129 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
           return;
         }
 
-        // ── reuniões ────────────────────────────────────────────────
+        // ── webhooks registry ──────────────────────────────────────
+        if (rota === "/webhooks" && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const porta = server.address() && typeof server.address() === "object" ? (server.address() as any).port : "";
+          const baseUrl = porta ? `http://localhost:${porta}` : "";
+          const webhooks = await flows.listarWebhooks(ws.path, baseUrl);
+          enviar(res, 200, webhooks);
+          return;
+        }
+
+        // ── components (marketplace) ───────────────────────────────
+        if (rota === "/components" && req.method === "GET") {
+          const ws = await resolverWs(url);
+          await registrarBuiltins(ws.path, components);
+          const lista = await components.listar(ws.path);
+          enviar(res, 200, lista);
+          return;
+        }
+        if (rota === "/components" && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const corpo = await lerCorpo(req);
+          const comp = await components.criar(ws.path, corpo);
+          enviar(res, 201, comp);
+          return;
+        }
+        if (rota === "/components/shared" && req.method === "GET") {
+          const lista = await components.listarGlobais();
+          enviar(res, 200, lista);
+          return;
+        }
+        if (rota === "/components/import" && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const corpo = (await lerCorpo(req)) as Record<string, unknown>;
+          const comp = await components.importar(ws.path, corpo, { sobrescrever: Boolean(corpo?.sobrescrever) });
+          enviar(res, 201, comp);
+          return;
+        }
+        const mCompTest = /^\/components\/([^/]+)\/test$/.exec(rota);
+        if (mCompTest && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const corpo = (await lerCorpo(req)) as { entrada?: string };
+          const id = decodeURIComponent(mCompTest[1]!);
+          const resultado = await components.testar(ws.path, id, String(corpo?.entrada ?? ""));
+          enviar(res, 200, resultado);
+          return;
+        }
+        const mCompPublish = /^\/components\/([^/]+)\/publish$/.exec(rota);
+        if (mCompPublish && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mCompPublish[1]!);
+          const destino = await components.publicar(ws.path, id);
+          enviar(res, 200, { ok: true, id, destino });
+          return;
+        }
+        const mCompInstall = /^\/components\/([^/]+)\/install$/.exec(rota);
+        if (mCompInstall && req.method === "POST") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mCompInstall[1]!);
+          const comp = await components.instalar(ws.path, id);
+          enviar(res, 200, { ok: true, componente: comp });
+          return;
+        }
+        const mCompExport = /^\/components\/([^/]+)\/export$/.exec(rota);
+        if (mCompExport && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mCompExport[1]!);
+          const exp = await components.exportar(ws.path, id);
+          enviar(res, 200, exp);
+          return;
+        }
+        const mComp = /^\/components\/([^/]+)$/.exec(rota);
+        if (mComp && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mComp[1]!);
+          const comp = await components.obter(ws.path, id);
+          enviar(res, 200, comp);
+          return;
+        }
+        if (mComp && req.method === "PUT") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mComp[1]!);
+          const corpo = await lerCorpo(req);
+          const comp = await components.atualizar(ws.path, id, corpo);
+          enviar(res, 200, comp);
+          return;
+        }
+        if (mComp && req.method === "DELETE") {
+          const ws = await resolverWs(url);
+          const id = decodeURIComponent(mComp[1]!);
+          await components.excluir(ws.path, id);
+          enviar(res, 200, { ok: true, excluido: id });
+          return;
+        }
+
+        // ── audit logs ─────────────────────────────────────────────
+        if (rota === "/audit" && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const limite = Math.min(Math.max(parseInt(String(url.searchParams.get("limite") ?? "50"), 10) || 50, 1), 200);
+          const offset = Math.max(parseInt(String(url.searchParams.get("offset") ?? "0"), 10) || 0, 0);
+          const filtroEvento = url.searchParams.get("evento");
+          const filtroPor = url.searchParams.get("por");
+          const filtroFlow = url.searchParams.get("flow");
+
+          let eventos = await registros.lerJournal(ws.path, "logs", "audit-log");
+          if (filtroEvento) eventos = eventos.filter((e) => e.evento === filtroEvento);
+          if (filtroPor) eventos = eventos.filter((e) => String(e.por ?? "").includes(filtroPor));
+          if (filtroFlow) eventos = eventos.filter((e) => (e as Record<string, unknown>).flow_id === filtroFlow || String(e.por ?? "") === `flow:${filtroFlow}`);
+
+          eventos.reverse();
+          const paginado = eventos.slice(offset, offset + limite);
+          enviar(res, 200, { total: eventos.length, limite, offset, eventos: paginado });
+          return;
+        }
+        if (rota === "/audit/flows" && req.method === "GET") {
+          const ws = await resolverWs(url);
+          const limite = Math.min(Math.max(parseInt(String(url.searchParams.get("limite") ?? "50"), 10) || 50, 1), 200);
+          let eventos = await registros.lerJournal(ws.path, "logs", "audit-log");
+          eventos = eventos.filter((e) => Boolean((e as Record<string, unknown>).flow_id) || String(e.por ?? "").startsWith("flow:") || String(e.evento ?? "").startsWith("flow_"));
+          eventos.reverse();
+          enviar(res, 200, { total: eventos.length, limite, eventos: eventos.slice(0, limite) });
+          return;
+        }
+
         if (rota === "/meetings" && req.method === "GET") {
           const ws = await resolverWs(url);
           const disco = await meetings.listar(ws.path);
@@ -3025,10 +3248,14 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
         if (mMeetingStop && req.method === "POST") {
           const ws = await resolverWs(url);
           const meetingId = decodeURIComponent(mMeetingStop[1]!);
-          // sala viva NESTE processo e ainda em andamento: flag de interrupção por sala — o loop quebra entre turnos
-          if (meetings.salaVivaEmAndamento(meetingId)) {
-            meetings.solicitarInterrupcao(meetingId);
-            enviar(res, 200, { ok: true, detalhe: `interrupção solicitada para reunião ${meetingId}` });
+          // sala viva NESTE processo:
+          if (meetings.temSalaViva(meetingId)) {
+            if (meetings.salaVivaEmAndamento(meetingId)) {
+              meetings.solicitarInterrupcao(meetingId);
+              enviar(res, 200, { ok: true, detalhe: `interrupção solicitada para reunião ${meetingId}` });
+              return;
+            }
+            enviar(res, 409, { erro: "nenhuma reunião ativa neste servidor" });
             return;
           }
           const reunioes = await meetings.listar(ws.path);
@@ -3716,7 +3943,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
         }
 
         // Helper: obtém porta do opencode server ou lança 409 se não iniciado (auto-iniciar opcional)
-        async function portaOpencodeOuErro(autoIniciar = true): Promise<number> {
+        async function portaOpencodeOuErro(autoIniciar = false): Promise<number> {
           let status = await opencodeServer.status();
           if (autoIniciar && (!status.rodando || !status.porta)) {
             try {

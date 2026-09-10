@@ -67,14 +67,13 @@ export const Sidebar: Component = () => {
         { href: "/workspace", label: "Workspace", icone: FolderCode },
         { href: "/tasks", label: "Tasks", icone: CheckSquare },
         { href: "/agentes", label: "Agentes", icone: Bot },
+        { href: "/reunioes", label: "Reuniões", icone: Users },
       ],
     },
     {
       titulo: "Automação",
       itens: [
-        { href: "/agenda", label: "Agenda", icone: Calendar },
-        { href: "/fluxos", label: "Fluxos", icone: GitBranch, badgeTag: "Alfa" },
-        { href: "/hooks", label: "Hooks", icone: Webhook, badgeTag: "Alfa" },
+        { href: "/fluxos", label: "Fluxos & Automação", icone: GitBranch },
         { href: "/apps", label: "Apps", icone: Layout, badgeTag: "Alfa" },
       ],
     },
@@ -90,6 +89,13 @@ export const Sidebar: Component = () => {
 
   const isAtivo = (href: string) => {
     if (href === "/home") return location.pathname === "/" || location.pathname === "/home";
+    if (href === "/fluxos") {
+      return (
+        location.pathname.startsWith("/fluxos") ||
+        location.pathname.startsWith("/agenda") ||
+        location.pathname.startsWith("/hooks")
+      );
+    }
     return location.pathname.startsWith(href);
   };
 

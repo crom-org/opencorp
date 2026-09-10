@@ -1,3 +1,9 @@
+/**
+ * @deprecated Este módulo está deprecado. Webhooks agora são nós do tipo "webhook"
+ * dentro de um Flow (flow-store.ts). Este arquivo é mantido apenas para backward
+ * compatibility com hooks existentes. Não crie novos hooks — use flows com nó webhook.
+ * Veja: POST /flows/:id/webhook
+ */
 import { randomBytes, createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

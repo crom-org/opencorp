@@ -157,6 +157,7 @@ export class AppStore {
               categoria: "Painel",
               tipo: "spec",
               entryUrl: `/apps/${encodeURIComponent(app.id)}`,
+              widgets: app.paginas.reduce((n, p) => n + p.widgets.length, 0),
               padrao: "app",
             });
           }

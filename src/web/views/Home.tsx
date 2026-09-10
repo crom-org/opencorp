@@ -86,7 +86,6 @@ export const HomeView: Component = () => {
   const [agentes, setAgentes] = createSignal<any[]>([]);
   const [sessoesSecretario, setSessoesSecretario] = createSignal<any[]>([]);
   const [fluxos, setFluxos] = createSignal<any[]>([]);
-  const [hooks, setHooks] = createSignal<any[]>([]);
 
   const abaInicial = () => {
     try {
@@ -226,7 +225,7 @@ export const HomeView: Component = () => {
   const carregarDadosHome = async () => {
     if (!wsAtivo()) return;
     try {
-      const [tasks, ags, flows, aprovs, budget, status, jobs, rExecs, sSec, rHooks] = await Promise.allSettled([
+      const [tasks, ags, flows, aprovs, budget, status, jobs, rExecs, sSec] = await Promise.allSettled([
         fetchApi<any[]>("/tasks"),
         fetchApi<any[]>("/agents"),
         fetchApi<any[]>("/flows"),
@@ -236,7 +235,6 @@ export const HomeView: Component = () => {
         fetchApi<any[]>("/schedules"),
         fetchApi<any[]>("/execucoes?limite=30"),
         fetchApi<any[]>("/secretario/sessoes"),
-        fetchApi<any[]>("/hooks"),
       ]);
 
       const getVal = <T>(r: PromiseSettledResult<T>, def: T): T => (r.status === "fulfilled" && r.value != null ? r.value : def);
@@ -255,7 +253,6 @@ export const HomeView: Component = () => {
       setSchedules(dJobs);
       setExecucoes(dExecs);
       setFluxos(dFlows);
-      setHooks(Array.isArray(getVal(rHooks, [])) ? getVal(rHooks, []) : []);
       setSessoesSecretario(Array.isArray(getVal(sSec, [])) ? getVal(sSec, []) : []);
 
       // Identificar se há algum agente executando agora (background run OU Secretário Executivo)
@@ -500,7 +497,7 @@ export const HomeView: Component = () => {
             { key: "tasks", label: "Tasks", icon: () => <CheckSquare size={13} class="text-amber-400" />, badge: () => <span class="text-[10px] font-mono text-zinc-500">{tasksEmAndamento().length}</span> },
             { key: "falhas", label: "Falhas", icon: () => <AlertTriangle size={13} class={execucoesFalhas().length > 0 ? "text-rose-400" : "text-zinc-400"} />, badge: execucoesFalhas().length > 0 ? () => <span class="text-[10px] font-mono text-rose-400">{execucoesFalhas().length}</span> : null },
             { key: "agendamentos", label: "Agendamentos", icon: () => <Timer size={13} class="text-emerald-400" />, badge: () => <span class="text-[10px] font-mono text-zinc-500">{schedules().length}</span> },
-            { key: "fluxos", label: "Fluxos", icon: () => <GitBranch size={13} class="text-indigo-400" />, badge: () => <span class="text-[10px] font-mono text-zinc-500">{fluxos().length + hooks().length}</span> },
+            { key: "fluxos", label: "Fluxos", icon: () => <GitBranch size={13} class="text-indigo-400" />, badge: () => <span class="text-[10px] font-mono text-zinc-500">{fluxos().length}</span> },
           ] as Array<{ key: string; label: string; icon: () => any; badge: (() => any) | null }>}
           >
             {(tab) => (
@@ -1547,29 +1544,41 @@ export const HomeView: Component = () => {
       </Show>
 
       {/* ─────────────────────────────────────────────────────────────
-          ABA 7: FLUXOS & HOOKS
+          ABA 7: FLUXOS & AUTOMAÇÃO (HLE / WORKFLOWS UNIFICADOS)
          ───────────────────────────────────────────────────────────── */}
       <Show when={abaAtiva() === "fluxos"}>
         <div class="space-y-6">
-          {/* Fluxos Operacionais */}
           <div class="space-y-3">
             <div class="flex items-center justify-between">
               <h3 class="text-sm font-bold text-zinc-100 font-mono flex items-center gap-2">
                 <GitBranch size={16} class="text-indigo-400" />
-                <span>Fluxos de Trabalho Cadastrados ({fluxos().length})</span>
+                <span>Fluxos & Automações ({fluxos().length})</span>
               </h3>
               <A href="/fluxos" class="text-xs font-mono text-indigo-400 hover:underline">
-                Abrir Editor de Fluxos →
+                Abrir Studio de Fluxos →
               </A>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
               <For each={fluxos()}>
                 {(fl) => (
-                  <div class="p-3.5 rounded-2xl bg-zinc-900/50 border border-zinc-800 hover:border-indigo-700/60 transition-all flex flex-col justify-between gap-2 shadow-xs">
+                  <div class="p-3.5 rounded-2xl bg-zinc-900/50 border border-zinc-800 hover:border-indigo-700/60 transition-all flex flex-col justify-between gap-3 shadow-xs">
                     <div>
-                      <div class="text-[10px] font-mono text-zinc-500">{fl.id}</div>
-                      <div class="text-xs font-bold text-zinc-100 mt-1">{fl.nome || fl.id}</div>
+                      <div class="flex items-center justify-between">
+                        <span class="text-[10px] font-mono text-zinc-500">{fl.id}</span>
+                        <div class="flex items-center gap-1">
+                          <Show when={fl.gatilhos?.includes("cron")}>
+                            <span class="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[9px] font-mono">⏰ Cron</span>
+                          </Show>
+                          <Show when={fl.gatilhos?.includes("webhook")}>
+                            <span class="px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[9px] font-mono">⚡ Webhook</span>
+                          </Show>
+                          <Show when={fl.temLoop}>
+                            <span class="px-1.5 py-0.5 rounded bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 text-[9px] font-mono">🔁 Loop</span>
+                          </Show>
+                        </div>
+                      </div>
+                      <div class="text-xs font-bold text-zinc-100 mt-1.5">{fl.nome || fl.id}</div>
                       <div class="text-[11px] text-zinc-400 font-mono mt-1">
                         {fl.nos ?? 0} nós · {fl.arestas ?? 0} conexões
                       </div>
@@ -1578,50 +1587,12 @@ export const HomeView: Component = () => {
                       href={`/fluxos?fluxo=${encodeURIComponent(fl.id)}`}
                       class="text-[11px] font-mono text-indigo-400 hover:underline pt-2 border-t border-zinc-800/80 block text-right"
                     >
-                      Editar Fluxo →
+                      Abrir no Studio →
                     </A>
                   </div>
                 )}
               </For>
             </div>
-          </div>
-
-          {/* Webhooks Configurados */}
-          <div class="space-y-3">
-            <div class="flex items-center justify-between">
-              <h3 class="text-sm font-bold text-zinc-100 font-mono flex items-center gap-2">
-                <Terminal size={16} class="text-amber-400" />
-                <span>Webhooks & Gatilhos ({hooks().length})</span>
-              </h3>
-              <A href="/hooks" class="text-xs font-mono text-amber-400 hover:underline">
-                Gerenciar Webhooks →
-              </A>
-            </div>
-
-            <Show
-              when={hooks().length > 0}
-              fallback={
-                <div class="p-6 rounded-2xl bg-zinc-900/40 border border-zinc-800 text-center text-xs text-zinc-400">
-                  Nenhum webhook configurado ainda. Você pode cadastrar em <A href="/hooks" class="text-amber-400 underline">Webhooks</A>.
-                </div>
-              }
-            >
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <For each={hooks()}>
-                  {(hk) => (
-                    <div class="p-3.5 rounded-2xl bg-zinc-900/50 border border-zinc-800 flex items-center justify-between gap-3 font-mono text-xs">
-                      <div>
-                        <div class="font-bold text-zinc-100">{hk.nome || hk.id}</div>
-                        <div class="text-[10px] text-zinc-400 mt-0.5">Rota: {hk.url || `/hooks/${hk.id}`}</div>
-                      </div>
-                      <span class="px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px]">
-                        POST
-                      </span>
-                    </div>
-                  )}
-                </For>
-              </div>
-            </Show>
           </div>
         </div>
       </Show>

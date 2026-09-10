@@ -239,4 +239,76 @@ function wsDe(opts: { workspace?: string }): string | undefined {
         console.log(`${res.criados.length} flow(s) criado(s), ${res.pulados.length} pulado(s)`);
       }),
     );
+
+  flow
+    .command("export")
+    .argument("<id>", "id do flow a exportar")
+    .option("--out <arquivo>", "caminho de arquivo para salvar (padrão: imprime na saída padrão)")
+    .description("exporta a definição completa do flow como JSON")
+    .action((id: string, opts: { out?: string; workspace?: string }) =>
+      comErros(async () => {
+        const ws = await manager.resolver(wsDe(opts));
+        const json = await store.exportarJson(ws.path, id);
+        if (opts.out) {
+          const { writeFile } = await import("node:fs/promises");
+          const { resolve } = await import("node:path");
+          const caminhoDestino = resolve(process.cwd(), opts.out);
+          await writeFile(caminhoDestino, json, "utf8");
+          console.log(`ok: flow "${id}" exportado em ${caminhoDestino}`);
+        } else {
+          process.stdout.write(json);
+        }
+      }),
+    );
+
+  flow
+    .command("import")
+    .argument("<arquivo>", "caminho do arquivo JSON do flow (ou '-' para stdin)")
+    .option("--id <novo-id>", "novo id para o flow importado (opcional)")
+    .option("-f, --sobrescrever", "sobrescreve se o flow já existir")
+    .description("importa a definição de um flow a partir de arquivo JSON ou stdin")
+    .action((arquivo: string, opts: { id?: string; sobrescrever?: boolean; workspace?: string }) =>
+      comErros(async () => {
+        const ws = await manager.resolver(wsDe(opts));
+        let conteudo = "";
+        if (arquivo === "-") {
+          const chunks: Buffer[] = [];
+          for await (const chunk of process.stdin) {
+            chunks.push(Buffer.from(chunk));
+          }
+          conteudo = Buffer.concat(chunks).toString("utf8");
+        } else {
+          const { readFile } = await import("node:fs/promises");
+          const { resolve } = await import("node:path");
+          conteudo = await readFile(resolve(process.cwd(), arquivo), "utf8");
+        }
+
+        const flow = await store.importar(ws.path, conteudo, {
+          sobrescrever: opts.sobrescrever,
+          novoId: opts.id,
+        });
+        console.log(`ok: flow "${flow.id}" importado com sucesso (${flow.nos.length} nós, ${flow.arestas.length} arestas)`);
+      }),
+    );
+
+  flow
+    .command("webhooks")
+    .description("lista todos os nós webhook registrados nos flows, com URLs de trigger")
+    .action((opts: { workspace?: string }) =>
+      comErros(async () => {
+        const ws = await manager.resolver(wsDe(opts));
+        const webhooks = await store.listarWebhooks(ws.path, "http://localhost:3578");
+        if (webhooks.length === 0) {
+          console.log("Nenhum webhook encontrado nos flows.");
+          return;
+        }
+        console.log(`\n  Webhooks registrados (${webhooks.length}):\n`);
+        for (const wh of webhooks) {
+          console.log(`  ⚡ ${wh.flow_id} / ${wh.no_id}`);
+          console.log(`     URL: POST ${wh.url}`);
+          if (wh.config_url) console.log(`     Destino: ${wh.config_url}`);
+          console.log();
+        }
+      }),
+    );
 }

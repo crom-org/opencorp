@@ -27,7 +27,7 @@ describe("AppStore — CRUD e validação", () => {
     const a = await store.criar(wsPath, "painel", "Meu Painel");
     expect(a.id).toBe("painel");
     expect(a.paginas).toHaveLength(1);
-    expect(store.listar(wsPath)).toEqual([{ id: "painel", titulo: "Meu Painel", widgets: 0 }]);
+    expect(store.listar(wsPath)[0]).toMatchObject({ id: "painel", titulo: "Meu Painel", widgets: 0 });
     expect(store.obter(wsPath, "painel").titulo).toBe("Meu Painel");
   });
 

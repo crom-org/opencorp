@@ -14,7 +14,7 @@ function lerTs(dir: string): string[] {
   for (const nome of readdirSync(dir)) {
     const caminho = join(dir, nome);
     if (statSync(caminho).isDirectory()) saida.push(...lerTs(caminho));
-    else if (nome.endsWith(".ts")) saida.push(readFileSync(caminho, "utf8"));
+    else if (nome.endsWith(".ts") || nome.endsWith(".tsx")) saida.push(readFileSync(caminho, "utf8"));
   }
   return saida;
 }
@@ -61,11 +61,17 @@ describe("Contrato — handlers inline sempre expostos", () => {
     ).toEqual([]);
   });
 
-  it("conhece pelo menos os handlers que já foram bug", () => {
-    // regressão documentada: rodarFlowHub (home) e renderAgendaForm (agenda) já ficaram mortos
-    expect(referenciados.has("rodarFlowHub")).toBe(true);
-    expect(referenciados.has("renderAgendaForm")).toBe(true);
-    expect(referenciados.has("criarFlow")).toBe(true);
+  it("conhece pelo menos os componentes View críticos (regressão SolidJS)", () => {
+    // Após migração Svelte→SolidJS, handlers inline onclick="..." não existem mais.
+    // A regressão equivalente é verificar que os componentes críticos são exportados.
+    const todosOsFontes = fontes.join("\n");
+    const viewsCriticos = ["FluxosView", "HomeView", "SecretarioView", "TasksView"];
+    for (const view of viewsCriticos) {
+      expect(
+        todosOsFontes.includes(`export const ${view}`),
+        `componente ${view} não encontrado como export no src/web/`,
+      ).toBe(true);
+    }
   });
 });
 

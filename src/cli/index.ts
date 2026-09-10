@@ -13,6 +13,7 @@ import { registerBudgetCommand } from "./commands/budget.js";
 import { registerMeetingCommand } from "./commands/meeting.js";
 import { registerSubcorpCommand } from "./commands/subcorp.js";
 import { registerFlowCommand } from "./commands/flow.js";
+import { registerComponentCommand } from "./commands/component.js";
 import { registerTaskCommand } from "./commands/task.js";
 import { registerScheduleCommands } from "./commands/schedule.js";
 import { registerHookCommands } from "./commands/hook.js";
@@ -99,6 +100,7 @@ export function buildProgram(isOc: boolean = isModoOc()): Command {
   registerScheduleCommands(program);
   registerAppCommand(program);
   registerFlowCommand(program);
+  registerComponentCommand(program);
   registerSecretsCommand(program);
   registerTokensCommand(program);
   registerMotoresCommand(program);

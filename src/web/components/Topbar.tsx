@@ -75,7 +75,7 @@ export const Topbar: Component = () => {
       agentes: "Catálogo de Agentes",
       reunioes: "Reuniões Multi-Agente",
       agenda: "Rotinas & Agendamentos",
-      fluxos: "Fluxos de Trabalho",
+      fluxos: "Fluxos & Automação",
       hooks: "Webhooks & Gatilhos",
       apps: "Mini-Apps (Alfa)",
       secrets: "Segredos & Senhas",

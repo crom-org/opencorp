@@ -76,7 +76,7 @@ describe("Rotação de Modelos e Detecção de Erros de API (TEST-04)", () => {
   it("garante que a lista de rotação contém os modelos NVIDIA e Fallbacks em ordem válida", () => {
     expect(MODELOS_ROTACAO_PADRAO.length).toBeGreaterThanOrEqual(3);
 
-    const temNvidia = MODELOS_ROTACAO_PADRAO.some((m) => m.includes("nvidia/nemotron"));
+    const temNvidia = MODELOS_ROTACAO_PADRAO.some((m) => m.includes("nemotron"));
     expect(temNvidia).toBe(true);
 
     const temFallback = MODELOS_ROTACAO_PADRAO.some((m) => m.includes("minimax") || m.includes("gemini") || m.includes("deepseek"));

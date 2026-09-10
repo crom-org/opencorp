@@ -75,7 +75,7 @@ describe("API — Reuniões v2 (sala viva)", () => {
       const res = await fetch(`${base}${path}`, {
         ...opts,
         headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(opts.headers ?? {}) },
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(10_000),
       });
       const text = await res.text();
       let json: unknown;

@@ -128,12 +128,12 @@ export function ehModeloGratuito(modelo: string): boolean {
 
 export const MODELOS_ROTACAO_PADRAO = [
   "opencode-go/glm-5.3-flash",
+  "openrouter/meta-llama/llama-3.3-70b-instruct",
   "opencode/nemotron-3.5-lightning-free",
   "opencode/nemotron-3-ultra-free",
   "opencode-go/minimax-m3",
   "opencode-go/deepseek-v4-flash",
   "openrouter/google/gemini-2.5-flash",
-  "openrouter/meta-llama/llama-3.3-70b-instruct",
 ];
 
 const TETO_RUN_PADRAO_MIN = 20;
@@ -896,8 +896,6 @@ export class SessionManager {
         stdin: "ignore",
       });
     } catch (erro) {
-      const retry = await this.tentarRetry(ws, opcoes, registro, msg(erro));
-      if (retry) return retry;
       const falha = `não foi possível iniciar o runner (${runnerBin}): ${msg(erro)} — ele está no PATH? (rode "opencorp doctor")`;
       (registro as any).erro = falha;
       await this.finalizar(ws, registro, ag.frontmatter, "falhou", null, Date.now() - inicio.getTime(), falha, "", null);
@@ -974,8 +972,6 @@ export class SessionManager {
       if (watchdog?.estourou || mortePorTimeout) {
         return await resolverAposTimeout();
       }
-      const retry = await this.tentarRetry(ws, opcoes, registro, msg(erro));
-      if (retry) return retry;
       const falha = `não foi possível executar o runner (${runnerBin}): ${msg(erro)} — ele está no PATH? (rode "opencorp doctor")`;
       (registro as any).erro = falha;
       await this.finalizar(ws, registro, ag.frontmatter, "falhou", null, Date.now() - inicio.getTime(), falha, captura.join(""), null);
@@ -1114,87 +1110,42 @@ export class SessionManager {
     registro: RegistroExecucao,
     captura: string,
   ): Promise<ResultadoRun | null> {
+    if (opcoes.retryDe) return null;
     if (registro.status === "hitl_pendente") return null;
+    if (!PADRAO_ERRO_MODELO.test(captura)) return null;
 
-    const harnessAtual = opcoes.engine || opcoes.harness || "opencode";
-    const modelosTentados = Array.from(new Set([...(opcoes.retryDe?.modelosTentados ?? []), registro.modelo]));
-    const motoresTentados = Array.from(new Set([...(opcoes.retryDe?.motoresTentados ?? []), harnessAtual]));
-    const tentativas = opcoes.retryDe?.tentativas ?? 0;
-    if (tentativas >= 6) return null;
-
-    // 1. Rotação de MODELO dentro do mesmo harness se for erro de modelo
-    if (PADRAO_ERRO_MODELO.test(captura)) {
-      const listaModelosHarness = await obterListaRotacaoPorHarness(harnessAtual, this.agentes, ws.path, opcoes.agente, this.homeDir);
-      const proximoModelo = listaModelosHarness.find((m) => !modelosTentados.includes(m));
-
-      if (proximoModelo) {
-        const idRetry = gerarId("exec");
-        await this.registros.anexarEvento(ws.path, "execucoes", registro.id, {
-          ts: new Date().toISOString(),
-          por: "opencorp",
-          evento: "retry_modelo",
-          resumo: `falha no modelo (${registro.modelo}) do motor ${harnessAtual} — retry ${tentativas + 1} com ${proximoModelo} -> ${idRetry}`,
-        }).catch(() => undefined);
-
-        await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 500));
-        return this.rodar({
-          ...opcoes,
-          engine: harnessAtual,
-          model: proximoModelo,
-          execId: idRetry,
-          retryDe: {
-            de_modelo: registro.modelo,
-            de_harness: harnessAtual,
-            de_exec: registro.id,
-            tentativas: tentativas + 1,
-            modelosTentados: [...modelosTentados, proximoModelo],
-            motoresTentados,
-          },
-          gatilho: opcoes.gatilho
-            ? { ...opcoes.gatilho, origem: sufixarRetry(opcoes.gatilho.origem, proximoModelo) }
-            : undefined,
-        });
-      }
+    const falhaCreditos = PADRAO_ERRO_CREDITOS.test(captura);
+    let lista = await obterListaRotacaoCompleta(this.agentes, ws.path, opcoes.agente, this.homeDir);
+    if (falhaCreditos) {
+      lista = lista.filter((m) => ehModeloGratuito(m));
     }
+    const proximoModelo = proximoModeloRotacao(lista, registro.modelo);
+    if (!proximoModelo || proximoModelo === registro.modelo) return null;
 
-    // 2. Rotação de HARNESS / MOTOR (quando modelos se esgotam ou motor falha no processo)
-    const cadeiaHarness = await obterCadeiaHarness(this.agentes, ws.path, opcoes.agente, this.homeDir);
-    const proximoHarness = cadeiaHarness.find((h) => !motoresTentados.includes(h));
-
-    if (proximoHarness) {
-      const modelosNovoHarness = await obterListaRotacaoPorHarness(proximoHarness, this.agentes, ws.path, opcoes.agente, this.homeDir);
-      const modeloNovo = modelosNovoHarness[0] || "padrao";
-
-      const idRetry = gerarId("exec");
+    const idRetry = gerarId("exec");
+    try {
       await this.registros.anexarEvento(ws.path, "execucoes", registro.id, {
         ts: new Date().toISOString(),
         por: "opencorp",
-        evento: "retry_harness",
-        resumo: `falha no motor (${harnessAtual}) — alternando para motor ${proximoHarness} com modelo ${modeloNovo} -> ${idRetry}`,
-      }).catch(() => undefined);
-
-      await new Promise((resolve) => setTimeout(resolve, 1200 + Math.random() * 600));
-      return this.rodar({
-        ...opcoes,
-        engine: proximoHarness,
-        harness: proximoHarness,
-        model: modeloNovo,
-        execId: idRetry,
-        retryDe: {
-          de_modelo: registro.modelo,
-          de_harness: harnessAtual,
-          de_exec: registro.id,
-          tentativas: tentativas + 1,
-          modelosTentados: [...modelosTentados, modeloNovo],
-          motoresTentados: [...motoresTentados, proximoHarness],
-        },
-        gatilho: opcoes.gatilho
-          ? { ...opcoes.gatilho, origem: sufixarRetry(opcoes.gatilho.origem, `${proximoHarness}:${modeloNovo}`) }
-          : undefined,
+        evento: "retry_modelo",
+        resumo: `falha de modelo/API (${registro.modelo}) — 1 retry com ${proximoModelo}${falhaCreditos ? " (filtrando apenas gratuitos)" : ""} → ${idRetry}`,
       });
+    } catch {
+      /* journal best-effort */
     }
 
-    return null;
+    return this.rodar({
+      ...opcoes,
+      model: proximoModelo,
+      execId: idRetry,
+      retryDe: {
+        de_modelo: registro.modelo,
+        de_exec: registro.id,
+      },
+      gatilho: opcoes.gatilho
+        ? { ...opcoes.gatilho, origem: sufixarRetry(opcoes.gatilho.origem, proximoModelo) }
+        : undefined,
+    });
   }
 
   /**

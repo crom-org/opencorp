@@ -4,7 +4,6 @@ import { logado, seederEmpresaBasica, api, esperarNavegacao, esperarElementoText
 const views = [
   { hash: "home", titulo: "Informações importantes" },
   { hash: "tasks", titulo: "Tasks" },
-  { hash: "agenda", titulo: "Agenda" },
   { hash: "fluxos", titulo: "Fluxos" },
   { hash: "historico", titulo: "Histórico" },
   { hash: "secretario", titulo: "Secretário" },
