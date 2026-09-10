@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+const [nodeMajor] = process.versions.node.split(".").map(Number);
+if (nodeMajor < 20) {
+  console.error(`erro: o OpenCorp requer Node.js >= 20. Versão atual: ${process.version}`);
+  console.error("Configure seu ambiente/PATH para usar a versão correta do Node (ex: Node v20 ou v22 via nvm).");
+  process.exit(1);
+}
 import { accessSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";

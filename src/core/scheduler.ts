@@ -497,11 +497,33 @@ export class Scheduler {
       ? job.workspace
       : join(this.homeDir, "workspaces", job.workspace);
 
+    // Overlap Guard: previne disparar nova instância se a anterior ainda está em execução
+    try {
+      const db = await this.banco();
+      const ultima = db.prepare("SELECT resultado FROM job_runs WHERE job_id = ? ORDER BY id DESC LIMIT 1").get(job.id) as { resultado?: string } | undefined;
+      if (ultima?.resultado?.startsWith("spawn pid ")) {
+        const pidAnterior = parseInt(ultima.resultado.slice("spawn pid ".length), 10);
+        if (pidAnterior > 0) {
+          try {
+            process.kill(pidAnterior, 0);
+            return `ignorado: processo anterior ainda ativo (pid ${pidAnterior})`;
+          } catch {
+            // PID não está mais vivo, prossegue normalmente
+          }
+        }
+      }
+    } catch {
+      // Best-effort check
+    }
+
     const filho = spawn(execPath, cmdArgs, {
       cwd: wsDir,
       env: { ...process.env, OPENCORP_HOME: this.homeDir, OPENCORP_WORKSPACE: wsDir },
       detached: true,
       stdio: ["ignore", logFd, logFd],
+    });
+    filho.on("error", (err) => {
+      console.error(`[scheduler] erro no spawn do job ${job.id} (${job.nome}):`, err.message);
     });
     filho.unref();
     return `spawn pid ${filho.pid ?? 0}`;
@@ -617,6 +639,8 @@ export class Scheduler {
         }
       }
       executados.push(job.id);
+      // Stagger leve (250ms) entre spawns no mesmo tick para diluir pico de concorrência
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
     return { executados, pulados, reconciliados };
   }
