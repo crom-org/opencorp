@@ -54,7 +54,10 @@ export const IconButton: Component<IconButtonProps> = (props) => {
       class={`inline-flex items-center justify-center transition-colors select-none disabled:opacity-40 disabled:pointer-events-none cursor-pointer flex-shrink-0 ${variantClasses()} ${sizeClasses()} ${local.class ?? ""}`}
     >
       <Show when={local.icon} fallback={local.children}>
-        {(IconComp) => <Dynamic component={IconComp()} size={defaultIconSize()} />}
+        {(IconComp) => {
+          const s = () => defaultIconSize();
+          return <Dynamic component={IconComp()} size={s()} width={s()} height={s()} />;
+        }}
       </Show>
     </button>
   );

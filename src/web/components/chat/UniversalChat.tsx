@@ -241,46 +241,46 @@ export const UniversalChat: Component<UniversalChatProps> = (props) => {
         </Show>
 
         {/* Ações da Direita (Toggles, Sessões, Iframe) */}
-        <div class="flex items-center gap-1">
+        <div class="flex items-center gap-2">
           {/* Toggle de Pensamento */}
           <IconButton
-            icon={Brain}
+            size="lg"
             titulo={
               mostrarPensamento()
                 ? "Ocultar Raciocínio / Pensamento"
                 : "Exibir Raciocínio / Pensamento"
             }
             onClick={() => setMostrarPensamento((p) => !p)}
-            class={`h-8 w-8 ${
+            class={
               mostrarPensamento()
                 ? "text-purple-400 bg-purple-500/10 border border-purple-500/30"
                 : "text-zinc-500 hover:text-zinc-300"
-            }`}
+            }
           >
-            <Brain size={15} />
+            <Brain size={22} />
           </IconButton>
 
           {/* Toggle de Ações / Ferramentas */}
           <IconButton
-            icon={Terminal}
+            size="lg"
             titulo={
               mostrarAcoes()
                 ? "Ocultar Passos de Ferramentas"
                 : "Exibir Passos de Ferramentas"
             }
             onClick={() => setMostrarAcoes((a) => !a)}
-            class={`h-8 w-8 ${
+            class={
               mostrarAcoes()
                 ? "text-amber-400 bg-amber-500/10 border border-amber-500/30"
                 : "text-zinc-500 hover:text-zinc-300"
-            }`}
+            }
           >
-            <Terminal size={15} />
+            <Terminal size={22} />
           </IconButton>
 
           {/* Toggle de Preview Lateral (Iframe) */}
           <IconButton
-            icon={Globe}
+            size="lg"
             titulo={iframeAberto() ? "Fechar Preview Lateral" : "Abrir Preview Lateral (Iframe)"}
             onClick={() => {
               if (iframeAberto()) {
@@ -290,47 +290,47 @@ export const UniversalChat: Component<UniversalChatProps> = (props) => {
                 props.iframeConfig?.onToggle?.(true);
               }
             }}
-            class={`h-8 w-8 ${
+            class={
               iframeAberto()
                 ? "text-blue-400 bg-blue-500/15 border border-blue-500/30"
                 : "text-zinc-400 hover:text-zinc-200"
-            }`}
+            }
           >
-            <Globe size={15} />
+            <Globe size={22} />
           </IconButton>
 
           <Show when={props.onNovaSessao}>
             <IconButton
               data-testid="btn-nova-conversa"
-              icon={Plus}
+              size="lg"
               titulo="Nova Conversa"
               onClick={props.onNovaSessao!}
-              class="h-8 w-8 text-zinc-400 hover:text-zinc-200"
+              class="text-zinc-400 hover:text-zinc-200"
             >
-              <Plus size={15} />
+              <Plus size={22} />
             </IconButton>
           </Show>
 
           <Show when={props.onAbrirHistorico}>
             <IconButton
-              icon={History}
+              size="lg"
               titulo="Histórico de Sessões"
               onClick={props.onAbrirHistorico!}
-              class="h-8 w-8 text-zinc-400 hover:text-zinc-200"
+              class="text-zinc-400 hover:text-zinc-200"
             >
-              <History size={15} />
+              <History size={22} />
             </IconButton>
           </Show>
 
           <Show when={props.onAbrirConfiguracoes}>
             <IconButton
-              icon={Settings2}
+              size="lg"
               titulo="Configurar Agente / Motor"
               data-testid="btn-configurar-motor"
               onClick={props.onAbrirConfiguracoes!}
-              class="h-8 w-8 text-zinc-400 hover:text-zinc-200"
+              class="text-zinc-400 hover:text-zinc-200"
             >
-              <Settings2 size={15} />
+              <Settings2 size={22} />
             </IconButton>
           </Show>
         </div>

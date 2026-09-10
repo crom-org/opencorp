@@ -4142,10 +4142,14 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
               return;
             }
             let isSessaoBusy = false;
+            let sessaoRetryInfo: { message?: string; action?: { message?: string; link?: string } } | null = null;
             if (resStatus && resStatus.ok) {
               try {
-                const statusMap = (await resStatus.json()) as Record<string, { type?: string }>;
+                const statusMap = (await resStatus.json()) as Record<string, { type?: string; message?: string; action?: { message?: string; link?: string } }>;
                 isSessaoBusy = statusMap[sessionId]?.type === "busy";
+                if (statusMap[sessionId]?.type === "retry") {
+                  sessaoRetryInfo = statusMap[sessionId] ?? null;
+                }
               } catch {}
             }
             const rawMsgs = ((await resOpencode.json()) as MensagemOc[]) ?? [];
@@ -4196,12 +4200,12 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                 // Não expira se a sessão estiver ativamente executando (busy) no daemon
                 const expirou = !isSessaoBusy && !m.info?.time?.completed && criadoEmMs > 0 && agora - criadoEmMs > 600_000;
                 const temErro = Boolean((m.info as any)?.error);
-                const erroDesc = temErro ? (((m.info as any)?.error as any)?.data?.message || ((m.info as any)?.error as any)?.name || "interrompido") : "";
+                const erroDesc = temErro ? (((m.info as any)?.error as any)?.data?.message || ((m.info as any)?.error as any)?.message || ((m.info as any)?.error as any)?.name || "interrompido") : "";
                 // Só consideramos incompleta se a sessão ESTIVER ativamente busy no daemon E finish for "tool-calls"
                 const isCompleted = isSessaoBusy
                   ? Boolean(m.info?.time?.completed && (m.info as any)?.finish !== "tool-calls")
                   : Boolean(m.info?.time?.completed || expirou || temErro || !isSessaoBusy);
-                const textoFinal = content || (expirou ? "(geração anterior interrompida ou expirada)" : (temErro && !content ? `(execução interrompida: ${erroDesc})` : ""));
+                const textoFinal = content || (expirou ? "(geração anterior interrompida ou expirada)" : (temErro && !content ? `⚠️ **Erro na resposta**: ${erroDesc}` : ""));
 
                 // Se a mensagem anterior já é do assistente (mesmo turno com múltiplos passos), consolida nela
                 const ult = mensagens[mensagens.length - 1];
@@ -4227,7 +4231,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                   // O status concluida reflete o último passo processado no turno
                   ult.concluida = isCompleted;
                 } else {
-                  const temAlgo = Boolean(textoFinal || passos.length > 0 || pensamento || tools.length > 0);
+                  const temAlgo = Boolean(textoFinal || passos.length > 0 || pensamento || tools.length > 0 || temErro);
                   if (temAlgo || !isCompleted) {
                     const passoComPergunta = passos.find((p) => (p as any).perguntas || p.pergunta);
                     mensagens.push({
@@ -4245,6 +4249,26 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                     } as any);
                   }
                 }
+              }
+            }
+
+            // Se o opencode estiver em estado retry (ex: limite de cota mensal atingido), expõe aviso claro
+            if (sessaoRetryInfo) {
+              const msgRetry = sessaoRetryInfo.message || sessaoRetryInfo.action?.message || "Limite de cota ou taxa do provedor atingido.";
+              const linkAviso = sessaoRetryInfo.action?.link ? ` [Acessar painel do provedor](${sessaoRetryInfo.action.link})` : "";
+              const avisoFormatado = `⚠️ **Limite de Cota no Provedor**: ${msgRetry}${linkAviso}`;
+
+              const ultMsg = mensagens[mensagens.length - 1];
+              if (!ultMsg || ultMsg.role === "user") {
+                mensagens.push({
+                  role: "assistant",
+                  content: avisoFormatado,
+                  concluida: true,
+                  criado_em: new Date().toISOString(),
+                });
+              } else if (ultMsg.role === "assistant" && !ultMsg.content) {
+                ultMsg.content = avisoFormatado;
+                ultMsg.concluida = true;
               }
             }
 
@@ -4684,9 +4708,10 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
               cfgResolvido?.settings.secretary?.model,
               cfgResolvido?.settings.default_model,
               ...(cfgResolvido?.settings.tests?.rotation || []),
-              "openrouter/minimax/minimax-m3:free",
-              "openrouter/nvidia/nemotron-3.5-lightning:free",
-              "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+              "google/gemini-3.6-flash",
+              "google/gemini-3.5-flash-lite",
+              "openrouter/qwen/qwen3-coder-flash",
+              "openrouter/minimax/minimax-m3",
             ].filter(Boolean) as string[];
             const modelosFallbackConv = [...new Set(candidatosConv)];
 
@@ -4702,6 +4727,11 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
 
             for (let mIdx = 0; mIdx < modelosFallbackConv.length; mIdx++) {
               const mod = modelosFallbackConv[mIdx]!;
+              const partesMod = String(mod).trim().split("/");
+              const modProvider = partesMod[0]!;
+              const modId = partesMod.slice(1).join("/");
+              const modelPayload = modProvider && modId ? { providerID: modProvider, modelID: modId } : undefined;
+
               if (mIdx > 0) {
                 await fetch(`${baseUrl}/session/${sessaoId}/abort`, { method: "POST" }).catch(() => {});
                 await sleep(300);
@@ -4716,6 +4746,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                   body: JSON.stringify({
                     sessionID: sessaoId,
                     agent: corpo.agente ?? "secretario",
+                    ...(modelPayload ? { model: modelPayload } : {}),
                     parts: [
                       { type: "text", text: mensagemComWs },
                       ...imagens.map((i) => ({ type: "file", mime: i.mime ?? "image/png", url: i.url! })),
@@ -4873,8 +4904,12 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
               cfgResolvidoStream?.settings.secretary?.model,
               cfgResolvidoStream?.settings.default_model,
               ...(cfgResolvidoStream?.settings.tests?.rotation || []),
+              "google/gemini-3.6-flash",
+              "google/gemini-3.5-flash-lite",
+              "openrouter/qwen/qwen3-coder-flash",
+              "openrouter/minimax/minimax-m3",
             ].filter(Boolean) as string[];
-            const modelosFallback = rotaModelos.length > 0 ? [...new Set(rotaModelos)] : ["opencode-go/glm-5.3-flash"];
+            const modelosFallback = rotaModelos.length > 0 ? [...new Set(rotaModelos)] : ["google/gemini-3.6-flash", "opencode-go/glm-5.3-flash"];
 
             let modeloIdx = 0;
             let concluida = false;
@@ -4886,6 +4921,10 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
 
             while (modeloIdx < modelosFallback.length && !concluida) {
               const modeloAtual = modelosFallback[modeloIdx]!;
+              const partesMod = String(modeloAtual).trim().split("/");
+              const modProvider = partesMod[0]!;
+              const modId = partesMod.slice(1).join("/");
+              const modelPayload = modProvider && modId ? { providerID: modProvider, modelID: modId } : undefined;
 
               if (modeloIdx > 0) {
                 // Notifica o cliente e o eventBus que estamos trocando para o modelo seguinte
@@ -4924,6 +4963,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                 body: JSON.stringify({
                   sessionID: sessaoId,
                   agent: agente,
+                  ...(modelPayload ? { model: modelPayload } : {}),
                   parts: [
                     { type: "text", text: mensagemStreamComWs },
                     ...imagens.map((i) => ({ type: "file", mime: i.mime ?? "image/png", url: i.url! })),
@@ -4956,6 +4996,22 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                   return;
                 }
 
+                // 1. Detecta estado retry de cota/rate-limit no daemon opencode
+                if (!postErro) {
+                  try {
+                    const statusRes = await fetch(`${baseUrl}/session/status`, { signal: AbortSignal.timeout(2000) });
+                    if (statusRes.ok) {
+                      const statusMap = (await statusRes.json()) as Record<string, any>;
+                      const sessStatus = statusMap[sessaoId];
+                      if (sessStatus?.type === "retry") {
+                        const msgRetry = sessStatus.message || sessStatus.action?.message || "limite de cota atingido";
+                        postErro = `opencode status retry: ${msgRetry}`;
+                        await fetch(`${baseUrlSessao}/abort`, { method: "POST" }).catch(() => {});
+                      }
+                    }
+                  } catch {}
+                }
+
                 if (postErro && !concluida) {
                   if (modeloIdx < modelosFallback.length - 1) {
                     const proximo = modelosFallback[modeloIdx + 1];
@@ -4980,6 +5036,16 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                   const inicioIdx = baselineId ? msgs.findIndex((m) => m.info?.id === baselineId) : -1;
                   const novasMsgs = inicioIdx >= 0 ? msgs.slice(inicioIdx + 1) : msgs;
                   const assistentesNovas = novasMsgs.filter((m) => m.info?.role === "assistant");
+
+                  // Detecta se alguma mensagem nova do assistente veio com erro de API
+                  const msgComErro = assistentesNovas.find((m) => Boolean((m.info as any)?.error));
+                  if (msgComErro && !postErro) {
+                    const errObj = (msgComErro.info as any).error;
+                    const desc = errObj?.data?.message || errObj?.message || errObj?.name || "erro na chamada de API do modelo";
+                    postErro = `erro no modelo: ${desc}`;
+                    await fetch(`${baseUrlSessao}/abort`, { method: "POST" }).catch(() => {});
+                    continue;
+                  }
 
                   if (assistentesNovas.length > 0) {
                     // Passos cronológicos estruturados em tempo real (pensamento 1 -> acao 1 -> pensamento 2...)
@@ -5033,22 +5099,20 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                     if (temProgresso) {
                       inicioTentativa = Date.now();
                       vazioDesde = null;
+                    } else {
+                      // Mensagem assistente criada porém travada sem conteúdo nem tool
+                      if (vazioDesde === null) vazioDesde = Date.now();
+                      else if (Date.now() - vazioDesde > 20_000) {
+                        postErro = `modelo ${modeloAtual} não gerou resposta após 20s`;
+                        await fetch(`${baseUrlSessao}/abort`, { method: "POST" }).catch(() => {});
+                      }
                     }
                   } else {
-                    // Nenhuma mensagem assistente iniciada após 120s
+                    // Nenhuma mensagem assistente iniciada após 20s
                     if (vazioDesde === null) vazioDesde = Date.now();
-                    else if (Date.now() - vazioDesde > 120_000) {
-                      if (modeloIdx < modelosFallback.length - 1) {
-                        const proximo = modelosFallback[modeloIdx + 1];
-                        console.warn(`[secretario] Modelo ${modeloAtual} não iniciou após 120s. Alternando para ${proximo}...`);
-                        sse("status", {
-                          tipo: "fallback_modelo",
-                          modelo: proximo,
-                          aviso: `⚠️ O modelo ${modeloAtual} demorou mais de 120s para iniciar. Alternando automaticamente para ${proximo}...`,
-                        });
-                        tentouFallback = true;
-                        break;
-                      }
+                    else if (Date.now() - vazioDesde > 20_000) {
+                      postErro = `modelo ${modeloAtual} não iniciou após 20s`;
+                      await fetch(`${baseUrlSessao}/abort`, { method: "POST" }).catch(() => {});
                     }
                   }
                 }
