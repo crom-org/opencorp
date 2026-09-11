@@ -200,22 +200,38 @@ export async function completarChatDirect(opcoes: OpcoesCompletar): Promise<Resp
   if (modelo.startsWith("opencode/")) modelo = modelo.slice("opencode/".length);
   if (modelo.startsWith("claude-code/")) modelo = modelo.slice("claude-code/".length);
 
-  // Provedor padrão via OpenRouter
   let url = "https://openrouter.ai/api/v1/chat/completions";
   let apiKey = chaves["openrouter"];
   let modelParam = modelo;
+  const headersReq: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-  if (modelo.startsWith("openrouter/")) {
-    modelParam = modelo.slice("openrouter/".length);
-  } else if (modelo.startsWith("google/") || modelo.startsWith("nvidia/") || modelo.startsWith("minimax/") || modelo.startsWith("anthropic/") || modelo.startsWith("openai/")) {
-    // Se foi passado sem openrouter/ mas tem formato org/model, usa OpenRouter como hub
-    modelParam = modelo;
-  }
+  if (modelo.startsWith("opencode-go/")) {
+    url = "https://opencode.ai/zen/go/v1/chat/completions";
+    apiKey = chaves["opencode-go"] || chaves["opencode"];
+    modelParam = modelo.slice("opencode-go/".length);
+    if (!apiKey) {
+      throw new Error("Nenhuma chave de API configurada para o provedor OpenCode-Go. Configure em Config → Motores & Provedores.");
+    }
+    headersReq["Authorization"] = `Bearer ${apiKey}`;
+    headersReq["x-opencode-session"] = "ses_" + Math.random().toString(36).slice(2);
+  } else {
+    if (modelo.startsWith("openrouter/")) {
+      modelParam = modelo.slice("openrouter/".length);
+    } else if (modelo.startsWith("google/") || modelo.startsWith("nvidia/") || modelo.startsWith("minimax/") || modelo.startsWith("anthropic/") || modelo.startsWith("openai/")) {
+      // Se foi passado sem openrouter/ mas tem formato org/model, usa OpenRouter como hub
+      modelParam = modelo;
+    }
 
-  if (!apiKey) {
-    throw new Error(
-      "Nenhuma chave de API encontrada para o provedor OpenRouter. Configure em Config → Chaves ou em ~/.opencorp/secrets.json",
-    );
+    if (!apiKey) {
+      throw new Error(
+        "Nenhuma chave de API encontrada para o provedor OpenRouter. Configure em Config → Chaves ou em ~/.opencorp/secrets.json",
+      );
+    }
+    headersReq["Authorization"] = `Bearer ${apiKey}`;
+    headersReq["HTTP-Referer"] = "https://opencorp.local";
+    headersReq["X-Title"] = "OpenCorp Direct Inference";
   }
 
   const controller = new AbortController();
@@ -224,12 +240,7 @@ export async function completarChatDirect(opcoes: OpcoesCompletar): Promise<Resp
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://opencorp.local",
-        "X-Title": "OpenCorp Direct Inference",
-      },
+      headers: headersReq,
       body: JSON.stringify({
         model: modelParam,
         messages: opcoes.messages,

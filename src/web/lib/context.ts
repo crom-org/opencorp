@@ -146,4 +146,13 @@ export function conectarSSE() {
       showToast(`Execução ${data.agente || "agente"} finalizada (${data.status})`, data.status === "concluido" ? "sucesso" : "aviso");
     } catch {}
   });
+
+  eventSource.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data && data.tipo === "secretario.mensagem") {
+        window.dispatchEvent(new CustomEvent("secretario:mensagem", { detail: data }));
+      }
+    } catch {}
+  };
 }

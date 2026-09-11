@@ -156,7 +156,17 @@ export function extrairPerguntasDeTexto(texto?: string): ItemPergunta[] {
 
       if (possiveisOpcoes.length >= 2 && possiveisOpcoes.length <= 6) {
         const saoMuitoLongas = possiveisOpcoes.some((o) => o.length > 130 || o.startsWith("##") || o.includes("\n"));
-        if (!saoMuitoLongas) {
+        // Filtra itens que são claramente dados/arquivos/caminhos e não opções reais de escolha
+        const pareceDados = possiveisOpcoes.some((o) =>
+          /\.(json|ts|tsx|js|jsx|yaml|yml|md|txt|csv|xml|html|css|py|sh|sql|log|png|jpg|gif|svg|mp4|webp|pdf|env|toml|lock)\b/i.test(o) ||
+          /^[`'"].*[`'"]$/.test(o) ||
+          /^['"`]/.test(o) ||
+          /^\/.+\//.test(o) ||
+          /^~\/|^\.\/|^home\/|^\/home/i.test(o) ||
+          /^[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z]{2,5}$/i.test(o) ||
+          /^(https?:\/\/|ftp:\/\/)/.test(o)
+        );
+        if (!saoMuitoLongas && !pareceDados) {
           let perguntaEncontrada: string | undefined;
           let headerEncontrado: string | undefined;
           for (let k = i - 1; k >= Math.max(0, i - 4); k--) {
@@ -169,15 +179,19 @@ export function extrairPerguntasDeTexto(texto?: string): ItemPergunta[] {
               break;
             }
           }
-          perguntas.push({
-            id: `q_${perguntas.length + 1}`,
-            header: headerEncontrado,
-            pergunta: perguntaEncontrada || "Escolha uma opção:",
-            opcoes: possiveisOpcoes,
-            permiteCustom: true,
-          });
-          i = j;
-          continue;
+          // Só cria card interativo se encontrou uma pergunta explícita antes da lista —
+          // listas numeradas sem pergunta são informativas (ex: listagem de arquivos, passos, etc.)
+          if (perguntaEncontrada) {
+            perguntas.push({
+              id: `q_${perguntas.length + 1}`,
+              header: headerEncontrado,
+              pergunta: perguntaEncontrada,
+              opcoes: possiveisOpcoes,
+              permiteCustom: true,
+            });
+            i = j;
+            continue;
+          }
         }
       }
     }
@@ -709,7 +723,7 @@ export const SessionTurn: Component<SessionTurnProps> = (props) => {
                 </Show>
 
                 {/* Passo: Ação / Tool (Bash, Comandos, Leitura) com Saída e Status */}
-                <Show when={props.mostrarAcoes !== false && passo.tipo === "acao"}>
+                <Show when={props.mostrarAcoes !== false && passo.tipo === "acao" && passo.ferramenta !== "unknown" && passo.ferramenta !== "invalid"}>
                   <details
                     class="rounded-xl bg-zinc-950/85 border border-zinc-800 text-xs font-mono text-zinc-300 my-1.5 overflow-hidden group"
                     open={Boolean(passo.saida && (passo.sucesso === false || (passo.saida.length < 500 && !m().content)))}

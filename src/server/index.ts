@@ -4002,13 +4002,21 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
             const partes = String(modeloCompleto).trim().split("/");
             const providerID = partes[0]!;
             const id = partes.slice(1).join("/");
-            const res = await fetch(`${baseUrl}/api/session/${encodeURIComponent(sessaoId)}/model`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ model: { id, providerID } }),
-              signal: AbortSignal.timeout(5000),
-            });
-            return res.status === 204 || res.ok;
+            const [res1, res2] = await Promise.all([
+              fetch(`${baseUrl}/api/session/${encodeURIComponent(sessaoId)}/model`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ model: { id, providerID } }),
+                signal: AbortSignal.timeout(5000),
+              }).catch(() => null),
+              fetch(`${baseUrl}/session/${encodeURIComponent(sessaoId)}`, {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ model: { id, providerID } }),
+                signal: AbortSignal.timeout(5000),
+              }).catch(() => null),
+            ]);
+            return Boolean((res1 && (res1.ok || res1.status === 204)) || (res2 && res2.ok));
           } catch {
             return false;
           }
@@ -4904,14 +4912,19 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
               cfgResolvidoStream?.settings.secretary?.model,
               cfgResolvidoStream?.settings.default_model,
               ...(cfgResolvidoStream?.settings.tests?.rotation || []),
+              "opencode-go/glm-5.3-flash",
+              "opencode/nemotron-3-ultra-free",
+              "opencode/nemotron-3.5-lightning-free",
               "google/gemini-3.6-flash",
               "google/gemini-3.5-flash-lite",
               "openrouter/qwen/qwen3-coder-flash",
               "openrouter/minimax/minimax-m3",
             ].filter(Boolean) as string[];
-            const modelosFallback = rotaModelos.length > 0 ? [...new Set(rotaModelos)] : ["google/gemini-3.6-flash", "opencode-go/glm-5.3-flash"];
+            const modelosFallback = rotaModelos.length > 0 ? [...new Set(rotaModelos)] : ["opencode-go/glm-5.3-flash", "opencode/nemotron-3-ultra-free"];
 
             let modeloIdx = 0;
+            let tentativasTotais = 0;
+            const maxTentativas = modelosFallback.length * 3; // Permite rotacionar continuamente entre os modelos disponíveis
             let concluida = false;
             let postData: MensagemOc | null = null;
             let enviado = "";
@@ -4919,19 +4932,19 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
             let acoesAvisadas = 0;
             let itensAssinatura = "";
 
-            while (modeloIdx < modelosFallback.length && !concluida) {
-              const modeloAtual = modelosFallback[modeloIdx]!;
+            while (tentativasTotais < maxTentativas && !concluida) {
+              const modeloAtual = modelosFallback[modeloIdx % modelosFallback.length]!;
               const partesMod = String(modeloAtual).trim().split("/");
               const modProvider = partesMod[0]!;
               const modId = partesMod.slice(1).join("/");
               const modelPayload = modProvider && modId ? { providerID: modProvider, modelID: modId } : undefined;
 
-              if (modeloIdx > 0) {
+              if (tentativasTotais > 0) {
                 // Notifica o cliente e o eventBus que estamos trocando para o modelo seguinte
                 sse("status", {
                   tipo: "fallback_modelo",
                   modelo: modeloAtual,
-                  aviso: `⚡ Modelo lento ou ocupado. Alternando automaticamente para ${modeloAtual}...`,
+                  aviso: `⚡ Alternando automaticamente para ${modeloAtual}...`,
                 });
                 eventBus.emit("secretario.mensagem", {
                   sessao_id: sessaoId,
@@ -4943,7 +4956,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                 await fetch(`${baseUrlSessao}/abort`, { method: "POST" }).catch(() => {});
                 await sleep(350);
 
-                // Hot-swap de modelo via /api/session/:id/model
+                // Hot-swap de modelo via /api/session/:id/model e PATCH /session/:id
                 await trocarModeloOpencode(baseUrl, sessaoId, modeloAtual);
                 await sleep(200);
               }
@@ -4953,6 +4966,13 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                 ? `[WORKSPACE ATIVO: "${wsParaCfgStream.id}" | CAMINHO: ${wsParaCfgStream.path}]\n(Atenção Secretário: O usuário está operando estritamente no workspace "${wsParaCfgStream.id}". Ao rodar comandos 'oc', use SEMPRE a flag '--workspace ${wsParaCfgStream.id}'. Suas análises, listagens e tarefas devem ser restritas exclusivamente a este workspace. Não consulte outros workspaces.)\n\n`
                 : "";
               const mensagemStreamComWs = `${wsPrefixoStream}${mensagem}`;
+
+              // Se já há passos anteriores e estamos alternando por falha de API, orienta a continuar
+              const msgsPreExistentes = (await listarMensagens()) ?? [];
+              const assistentesPre = msgsPreExistentes.filter((m) => m.info?.role === "assistant");
+              const textoParaEnvio = assistentesPre.length > 0 && tentativasTotais > 0
+                ? "Continue a execução anterior exatamente de onde parou. Conclua todas as análises e ações pendentes até finalizar a demanda por completo."
+                : mensagemStreamComWs;
 
               // POST em voo: responde só ao concluir; a geração reflete no GET /session em tempo real.
               let postConcluido = false;
@@ -4965,7 +4985,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                   agent: agente,
                   ...(modelPayload ? { model: modelPayload } : {}),
                   parts: [
-                    { type: "text", text: mensagemStreamComWs },
+                    { type: "text", text: textoParaEnvio },
                     ...imagens.map((i) => ({ type: "file", mime: i.mime ?? "image/png", url: i.url! })),
                   ],
                 }),
@@ -5013,8 +5033,25 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                 }
 
                 if (postErro && !concluida) {
-                  if (modeloIdx < modelosFallback.length - 1) {
-                    const proximo = modelosFallback[modeloIdx + 1];
+                  // Rotação de conta: se o modelo que falhou é opencode-go, tenta a próxima conta antes de saltar modelo
+                  if (modeloAtual.startsWith("opencode-go/") && postErro.includes("limit")) {
+                    try {
+                      const acctStore = new EngineAccountStore({ homeDir: opcoes.homeDir ?? opencorpHome() });
+                      const proxConta = await acctStore.rotacionarProximaConta("opencode-go");
+                      if (proxConta) {
+                        sse("status", {
+                          tipo: "rotacao_conta",
+                          aviso: `🔄 Conta OpenCode-Go "${proxConta.nome}" ativada (rotação automática por limite de cota).`,
+                        });
+                        // Reinicia secretário para usar nova chave
+                        await fetch(`${baseUrl}/abort`, { method: "POST" }).catch(() => {});
+                        await sleep(500);
+                      }
+                    } catch {}
+                  }
+
+                  if (tentativasTotais < maxTentativas - 1) {
+                    const proximo = modelosFallback[(modeloIdx + 1) % modelosFallback.length]!;
                     console.warn(`[secretario] Modelo ${modeloAtual} falhou (${postErro}). Alternando para ${proximo}...`);
                     sse("status", {
                       tipo: "fallback_modelo",
@@ -5022,6 +5059,9 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
                       aviso: `⚠️ O modelo ${modeloAtual} falhou (${postErro}). Alternando automaticamente para ${proximo}...`,
                     });
                     tentouFallback = true;
+                    if ((modeloIdx + 1) % modelosFallback.length === 0) {
+                      await sleep(2000);
+                    }
                     break;
                   } else {
                     sse("erro", { erro: `Falha ao conectar com o modelo (${postErro}). Todos os modelos de contingência foram tentados sem sucesso.`, sessao_id: sessaoId });
@@ -5125,11 +5165,11 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
               }
 
               if (concluida) break;
+              modeloIdx++;
+              tentativasTotais++;
               if (tentouFallback) {
-                modeloIdx++;
                 continue;
               }
-              modeloIdx++;
             }
 
             if (!concluida) {

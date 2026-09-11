@@ -397,6 +397,18 @@ export const ConfigView: Component = () => {
     };
   };
 
+  // Sub-provedores que pertencem ao ecossistema de cada motor
+  const SUB_PROVEDORES: Record<string, string[]> = {
+    opencode: ["opencode", "opencode-go"],
+  };
+
+  /** Filtra contas que pertencem ao motor atual (incluindo sub-provedores) */
+  const contasDoMotorAtual = () => {
+    const motorId = currentMotor().id;
+    const ids = SUB_PROVEDORES[motorId] || [motorId];
+    return contasPorMotor().filter((c) => ids.includes(c.motorId));
+  };
+
   const getProvedorStatus = (prov: ProvedorAgenteItem, motor: any) => {
     // 1. Provedor padrão no statusMotores()?.provedores
     const provPadrao = (statusMotores()?.provedores || []).find((p: any) => p.id === prov.id);
@@ -1707,7 +1719,7 @@ export const ConfigView: Component = () => {
                   <div class="flex items-center gap-2">
                     <Users size={14} class="text-zinc-400" />
                     <h4 class="text-xs font-semibold text-zinc-200">
-                      Contas Conectadas ({contasPorMotor().filter((c) => c.motorId === currentMotor().id).length})
+                      Contas Conectadas ({contasDoMotorAtual().length})
                     </h4>
                   </div>
                   <Button
@@ -1722,7 +1734,7 @@ export const ConfigView: Component = () => {
 
                 <div class="space-y-2">
                   <For
-                    each={contasPorMotor().filter((c) => c.motorId === currentMotor().id)}
+                    each={contasDoMotorAtual()}
                     fallback={
                       <div class="p-3 rounded-lg bg-zinc-900/30 border border-zinc-800/40 text-xs text-zinc-400 flex items-center justify-between">
                         <span>Nenhuma conta personalizada cadastrada no OpenCorp. O motor usa a credencial padrão do sistema.</span>
@@ -1746,7 +1758,7 @@ export const ConfigView: Component = () => {
                             }`}
                           />
                           <div class="min-w-0">
-                            <div class="flex items-center gap-2">
+                            <div class="flex items-center gap-2 flex-wrap">
                               <span class="font-medium text-zinc-200 truncate">{c.nome}</span>
                               <span
                                 class={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${
@@ -1757,9 +1769,18 @@ export const ConfigView: Component = () => {
                               >
                                 {c.ativa ? "CONTA ATIVA" : "SECUNDÁRIA"}
                               </span>
+                              <span class="text-[10px] font-mono px-1.5 py-0.2 rounded border bg-cyan-950/30 text-cyan-300 border-cyan-800/40">
+                                {c.motorId}
+                              </span>
                             </div>
-                            <div class="text-[11px] text-zinc-500 font-mono flex items-center gap-2 mt-0.5">
+                            <div class="text-[11px] text-zinc-500 font-mono flex items-center gap-2 mt-0.5 flex-wrap">
                               <span>Auth: {c.authType}</span>
+                              <span>•</span>
+                              <span class="text-amber-400/80">
+                                {c.tokenOuChave
+                                  ? `${c.tokenOuChave.slice(0, 6)}…${c.tokenOuChave.slice(-4)}`
+                                  : "—"}
+                              </span>
                               <span>•</span>
                               <span>Cota: {c.limits?.status_cota || "normal"}</span>
                               <span>•</span>
@@ -2125,7 +2146,8 @@ export const ConfigView: Component = () => {
                     daily_cost_usd: 10.0,
                     status_cota: "normal",
                   };
-                  const contas = () => contasPorMotor().filter((c) => c.motorId === m.id);
+                  const contaIds = SUB_PROVEDORES[m.id] || [m.id];
+                  const contas = () => contasPorMotor().filter((c) => contaIds.includes(c.motorId));
                   const contaAtiva = () => contas().find((c) => c.ativa) || contas()[0];
                   const liveTok = () => tokensMotores()[m.id] || m.tokens || null;
                   const cotaStatus = () => liveTok()?.statusCota || lim().status_cota || "normal";

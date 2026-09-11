@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "../../utils/fs-safe.js";
 import { opencorpHome } from "../../utils/paths.js";
@@ -167,7 +167,56 @@ export class EngineAccountStore {
 
     contas.push(novaConta);
     await this.salvarArquivoContas(contas);
+    await this.sincronizarAuth(motorId);
     return novaConta;
+  }
+
+  public async sincronizarAuth(motorOuProvedorId: string): Promise<void> {
+    try {
+      const ativa = await this.obterContaAtiva(motorOuProvedorId);
+      const authPath = join(this.homeDir, ".opencorp", "opencode-data", "opencode", "auth.json");
+      if (existsSync(authPath)) {
+        const auth = JSON.parse(readFileSync(authPath, "utf8"));
+        if (ativa?.tokenOuChave) {
+          auth[motorOuProvedorId] = { type: "api", key: ativa.tokenOuChave };
+          if (motorOuProvedorId === "opencode-go") {
+            auth["opencode"] = { type: "api", key: ativa.tokenOuChave };
+          }
+        }
+        await writeFileAtomic(authPath, `${JSON.stringify(auth, null, 2)}\n`);
+      }
+      const wsBase = join(this.homeDir, ".opencorp", "opencode-data", "workspaces");
+      if (existsSync(wsBase)) {
+        const dirs = readdirSync(wsBase, { withFileTypes: true });
+        for (const d of dirs) {
+          if (d.isDirectory()) {
+            const wsAuthPath = join(wsBase, d.name, "opencode", "auth.json");
+            if (existsSync(wsAuthPath)) {
+              try {
+                const wsAuth = JSON.parse(readFileSync(wsAuthPath, "utf8"));
+                if (ativa?.tokenOuChave) {
+                  wsAuth[motorOuProvedorId] = { type: "api", key: ativa.tokenOuChave };
+                  if (motorOuProvedorId === "opencode-go") {
+                    wsAuth["opencode"] = { type: "api", key: ativa.tokenOuChave };
+                  }
+                }
+                await writeFileAtomic(wsAuthPath, `${JSON.stringify(wsAuth, null, 2)}\n`);
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  public async rotacionarProximaConta(motorId: string): Promise<EngineAccount | null> {
+    const contas = this.lerArquivoContas().filter((c) => c.motorId === motorId);
+    if (contas.length <= 1) return null;
+    const idxAtiva = contas.findIndex((c) => c.ativa);
+    const proxIdx = idxAtiva >= 0 ? (idxAtiva + 1) % contas.length : 0;
+    const proxConta = contas[proxIdx]!;
+    await this.ativarConta(motorId, proxConta.id);
+    return proxConta;
   }
 
   public async ativarConta(motorId: string, contaId: string): Promise<void> {
@@ -183,6 +232,7 @@ export class EngineAccountStore {
       throw new Error(`Conta "${contaId}" não encontrada para o motor "${motorId}".`);
     }
     await this.salvarArquivoContas(contas);
+    await this.sincronizarAuth(motorId);
   }
 
   public async desconectarConta(motorId: string, contaId: string): Promise<void> {
@@ -200,6 +250,7 @@ export class EngineAccountStore {
     }
 
     await this.salvarArquivoContas(contas);
+    await this.sincronizarAuth(motorId);
   }
 
   public async atualizarLimitesConta(

@@ -275,6 +275,14 @@ export const SecretarioView: Component = () => {
   let abortController: AbortController | null = null;
   let timerInterval: any = null;
 
+  // Canal de sincronização instantânea entre abas/guias gêmeas do navegador
+  let syncChannel: BroadcastChannel | null = null;
+  if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+    try {
+      syncChannel = new BroadcastChannel("opencorp_chat_sync");
+    } catch {}
+  }
+
   const SUGESTOES = [
     "O que aconteceu hoje?",
     "Como está o board de tasks?",
@@ -685,6 +693,10 @@ export const SecretarioView: Component = () => {
     streamingAtivo = true;
     setDecorridoSegundos(0);
 
+    if (sid) {
+      try { syncChannel?.postMessage({ tipo: "mensagem_enviada", sessao_id: sid }); } catch {}
+    }
+
     setTimeout(scrollFim, 30);
 
     timerInterval = setInterval(() => {
@@ -758,6 +770,7 @@ export const SecretarioView: Component = () => {
             // Atualizar sessaoAtivaId com o ID real do servidor
             if (evtType === "inicio" && payload.sessao_id) {
               setSessaoAtivaId(payload.sessao_id);
+              try { syncChannel?.postMessage({ tipo: "mensagem_enviada", sessao_id: payload.sessao_id }); } catch {}
             }
 
             setMensagens((prev) => {
@@ -886,6 +899,7 @@ export const SecretarioView: Component = () => {
       void carregarSessoes();
       const sidFinal = sessaoAtivaId();
       if (sidFinal) {
+        try { syncChannel?.postMessage({ tipo: "mensagem_concluida", sessao_id: sidFinal }); } catch {}
         void fetchApi<ChatMensagem[]>(`/secretario/sessoes/${encodeURIComponent(sidFinal)}/mensagens`)
           .then((msgsFinais) => {
             if (Array.isArray(msgsFinais) && msgsFinais.length > 0) {
@@ -949,6 +963,58 @@ export const SecretarioView: Component = () => {
   onMount(() => {
     void carregarSessoes();
     void carregarAgentesEMotores();
+
+    // Sincronização entre abas gêmeas via BroadcastChannel
+    if (syncChannel) {
+      syncChannel.onmessage = (ev) => {
+        const d = ev.data;
+        if (!d) return;
+        if (d.sessao_id && d.sessao_id === sessaoAtivaId()) {
+          if (!streamingAtivo) {
+            retomarMonitoramento(d.sessao_id);
+          }
+        } else if (d.tipo === "nova_sessao" || d.tipo === "sessao_deletada") {
+          void carregarSessoes();
+        }
+      };
+    }
+
+    // Ao focar na aba, recarrega mensagens caso tenham chegado da outra guia
+    const onFoco = () => {
+      const sid = sessaoAtivaId();
+      if (sid && !streamingAtivo) {
+        void fetchApi<ChatMensagem[]>(`/secretario/sessoes/${encodeURIComponent(sid)}/mensagens`)
+          .then((msgs) => {
+            if (Array.isArray(msgs) && msgs.length > 0) {
+              setMensagens((prev) => reconciliarMensagens(prev, msgs));
+              const ult = msgs[msgs.length - 1];
+              if (ult && (ult.concluida === false || ult.role === "user")) {
+                retomarMonitoramento(sid);
+              }
+            }
+          })
+          .catch(() => null);
+      }
+    };
+    window.addEventListener("focus", onFoco);
+
+    // Evento SSE do servidor disparado por outra aba ou processo
+    const onSseSecretario = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      const sid = d?.dados?.sessao_id || d?.sessao_id;
+      if (sid && sid === sessaoAtivaId() && !streamingAtivo) {
+        retomarMonitoramento(sid);
+      }
+    };
+    window.addEventListener("secretario:mensagem", onSseSecretario);
+
+    onCleanup(() => {
+      window.removeEventListener("focus", onFoco);
+      window.removeEventListener("secretario:mensagem", onSseSecretario);
+      if (syncChannel) {
+        try { syncChannel.close(); } catch {}
+      }
+    });
   });
 
   createEffect(() => {
