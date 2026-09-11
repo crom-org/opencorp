@@ -24,6 +24,45 @@ O **OpenCorp** é um sistema operacional distribuído para governar empresas aut
 
 ---
 
+## 🏢 Como Funciona o OpenCorp: A Visão Geral
+
+Se você acabou de chegar, entenda a regra de ouro: **você é o Dono de uma Empresa Digital Autônoma (*Workspace*)**, e as ferramentas do painel representam os departamentos da sua empresa:
+
+```mermaid
+flowchart TD
+    DONO["👤 Você (O Dono / Operador)"] <-->|Ordens & Chat| SEC["🤖 Secretário Executivo\n(Seu Chefe de Operações)"]
+
+    subgraph OPERACAO["🏢 Operação e Execução Diária"]
+        SEC -->|Cria / Delega / Fiscaliza| KANBAN["📋 Tasks (Kanban)\nQuadro oficial de trabalho transparente"]
+        SEC -->|Convoca| REUNIOES["👥 Reuniões Multi-Agente\nMesa redonda deliberativa com ATA"]
+        SEC -->|Dispara / Edita| FLUXOS["⚡ Fluxos (Studio em Nós n8n)\nEsteiras e pipelines visuais em grafo"]
+    end
+
+    subgraph MOTOR["⚙️ O Coração Autônomo 24/7"]
+        SCHEDULER["⏰ Scheduler (Daemon do Sistema)\nRelógio contínuo com zero downtime"]
+        AGENTES["👷 Catálogo de Agentes Especialistas\nPautador, Editor, Redator, SRE, etc."]
+    end
+
+    SCHEDULER -->|Ativa rotinas no horário| FLUXOS
+    SCHEDULER -->|Despacha tarefas da fila para| AGENTES
+    AGENTES -->|Executam o trabalho no| KANBAN
+    REUNIOES -->|Decisões da ATA viram| KANBAN
+
+    style DONO fill:#181825,stroke:#89b4fa,color:#cdd6f4
+    style SEC fill:#313244,stroke:#f38ba8,color:#cdd6f4
+    style OPERACAO fill:#1e1e2e,stroke:#cba6f7,color:#cdd6f4
+    style MOTOR fill:#181825,stroke:#f9e2af,color:#cdd6f4
+```
+
+### Os 5 Pilares de uma Empresa no OpenCorp:
+1. **🤖 Secretário Executivo (`/secretario`)**: Seu braço direito com chat em tempo real via SSE. Ele tem permissões executivas completas (`@secretario-exec`) para investigar logs, rodar comandos no terminal, criar tarefas e resolver problemas de ponta a ponta.
+2. **📋 Tasks & Kanban (`/tasks`)**: O quadro de governança transparente baseado em SQLite (`tasks.db`). Evita trabalho invisível de agentes: tarefas fluem por `aguardando` → `fazendo` → `revisão/HITL` → `feito`. Ações sensíveis exigem aprovação humana (*Human-In-The-Loop*).
+3. **⚡ Fluxos & Studio Visual (`/fluxos`)**: Construtor visual de workflows em grafo (estilo n8n). Conecte nós de gatilho (*Cron/Webhook*), nós de agentes, nós de decisão/condição e nós de ação/script. Salvos em `.opencorp/flows/<id>.json`.
+4. **👥 Reuniões Multi-Agente (`/reunioes`)**: Mesa redonda onde agentes de diferentes papéis (CEO, Especialista SEO, Dev, Redator) debatem um desafio, geram uma ATA oficial e transformam deliberações automaticamente em novas Tasks no Kanban.
+5. **⏰ Scheduler & Daemon 24/7 (`opencorp scheduler`)**: O relógio do sistema que roda em background (tick a cada 15-30s), despachando rotinas e executando automações com claim atômico e recarga instantânea de novos jobs sem downtime.
+
+---
+
 ## 📋 Pré-requisitos
 
 * **Node.js**: `>= 20.0.0` (recomendado Node 22+)
@@ -310,23 +349,26 @@ O OpenCorp conta com hierarquia segura de resolução (`Workspace` com override 
 
 ---
 
-## 🧩 Arquitetura & Motores Suportados
+## 🧩 Arquitetura, Motores & Rotação de IA
 
-O OpenCorp oferece suporte a múltiplos motores de execução (harnesses):
+O OpenCorp oferece suporte a múltiplos motores de execução (harnesses) e um sistema resiliente em camadas de tolerância a falhas:
 
 * **OpenCode Engine:** Runner local isolado com suporte a MCP, ferramentas customizadas e histórico de sessões.
 * **Claude Code Engine:** Execução orquestrada com Claude.
-* **Antigravity Engine:** Integração com o ecossistema Antigravity.
-* **Provedores de Inferência Direta:** Conexão nativa com OpenRouter, Google AI Studio, Anthropic e OpenAI com rotatividade automática em caso de rate-limit.
+* **Antigravity Engine:** Integração nativa com o ecossistema Google Antigravity.
+* **Provedores de Inferência Direta:** OpenRouter, Google AI Studio, Anthropic e OpenAI.
+* **🔄 Sistema de Rotação Automática de IA:**
+  - **Rotação de Contas:** Se uma chave atinge rate-limit ou cota (429), o sistema rotaciona para a próxima conta de API disponível via `EngineAccountStore`.
+  - **Fallback Circular de Modelos:** Se um modelo cair, a requisição transita suavemente para o próximo da lista de contingência (ex: GLM → Gemini → Nemotron → Qwen) sem interromper a sessão do usuário.
 
 ---
 
 ## 🧪 Testes Automatizados
 
-O projeto conta com cobertura de testes unitários e de integração utilizando Vitest:
+O projeto conta com cobertura de testes unitários, testes de integração e testes End-to-End (E2E) no browser:
 
 ```bash
-# Executar a bateria de testes unitários
+# Executar a bateria de testes unitários e integração (Vitest)
 npm test
 
 # Executar testes específicos de isolamento de segredos
@@ -334,6 +376,9 @@ npx vitest run tests/secrets-store.test.ts
 
 # Executar testes de isolamento de workspaces
 npx vitest run tests/workspace-isolation.test.ts
+
+# Executar a suíte completa de testes End-to-End no browser (Playwright)
+npm run test:e2e
 ```
 
 ---
