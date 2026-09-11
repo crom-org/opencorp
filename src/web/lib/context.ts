@@ -100,12 +100,22 @@ export async function fetchApi<T = unknown>(path: string, opts: RequestInit = {}
 
 export async function carregarWorkspaces(): Promise<WorkspaceInfo[]> {
   try {
-    const lista = await fetchApi<WorkspaceInfo[]>("/workspaces");
+    const lista = await fetchApi<(WorkspaceInfo & { ativo?: boolean })[]>("/workspaces");
     setWorkspaces(lista);
     if (lista.length === 0) {
       setWsAtivo("");
     } else if (wsAtivo() && !lista.some((w) => w.id === wsAtivo())) {
+      // Workspace no localStorage não existe mais — limpar
       setWsAtivo("");
+    }
+    // Se nenhum workspace ativo no localStorage, sincronizar com o backend
+    if (!wsAtivo() && lista.length > 0) {
+      const ativoBe = lista.find((w) => w.ativo);
+      if (ativoBe) {
+        setWsAtivo(ativoBe.id);
+      } else {
+        setWsAtivo(lista[0].id);
+      }
     }
     return lista;
   } catch {
