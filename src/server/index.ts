@@ -4849,7 +4849,7 @@ export function createApiServer(opcoes: ApiServerOptions = {}): {
             });
 
             const baseUrl = `http://127.0.0.1:${porta}`;
-            const agente = corpo.agente ?? "secretario";
+            const agente = corpo.agente ?? "secretario-exec";
             let sessaoId = corpo.sessao_id || url.searchParams.get("sessao") || undefined;
 
             // Se sessaoId foi informado, verifica se ela realmente existe no opencode
